@@ -158,7 +158,16 @@ jobs:
       - name: Prepare deploy script
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
-        run: sed "s|__DEPLOY_TOKEN__|${DEPLOY_TOKEN}|" .github/deploy/_deploy.php > _deploy.php
+        # PHP does the substitution so the token may contain any character
+        run: |
+          php -r '
+            $token = preg_replace("/\\s+/", "", getenv("DEPLOY_TOKEN"));
+            $script = file_get_contents(".github/deploy/_deploy.php");
+            $out = str_replace("__DEPLOY_TOKEN__", var_export($token, true), $script, $count);
+            if ($count !== 1 || $token === "") { fwrite(STDERR, "Could not place DEPLOY_TOKEN in _deploy.php\n"); exit(1); }
+            file_put_contents("_deploy.php", $out);
+          '
+          php -l _deploy.php
 
       - name: Upload via FTP
         env:
@@ -180,8 +189,9 @@ jobs:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
           REMOTE_DIR: ${{ steps.ftp.outputs.remote_dir }}
         run: |
+          token=$(printf '%s' "$DEPLOY_TOKEN" | tr -d '[:space:]')
           status=$(curl --silent --show-error --max-time 600 -o deploy-output.txt -w '%{http_code}' \
-            -X POST -H "X-Deploy-Token: ${DEPLOY_TOKEN}" "${DEPLOY_URL}") || true
+            -X POST -H "X-Deploy-Token: ${token}" "${DEPLOY_URL}") || true
           cat deploy-output.txt 2>/dev/null || true
           case "$status" in
             200) ;;

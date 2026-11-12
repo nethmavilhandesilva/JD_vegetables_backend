@@ -2,7 +2,7 @@
 // Uploaded by the GitHub Actions pipeline next to deploy.zip.
 // Extracts the release, clears caches and runs migrations.
 
-$token = '__DEPLOY_TOKEN__';
+$token = __DEPLOY_TOKEN__; // replaced by the pipeline with the DEPLOY_TOKEN secret
 
 // Buffer output so the status code can still be changed after echoing progress
 ob_start();
