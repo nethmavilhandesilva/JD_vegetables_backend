@@ -73,7 +73,7 @@ Repository secrets (GitHub > Settings > Secrets and variables > Actions):
 | Secret         | Value                                              |
 | -------------- | -------------------------------------------------- |
 | `FTP_SERVER`   | `ftp.goviraju.lk`                                  |
-| `FTP_USERNAME` | the FTP account, e.g. `deploy2@goviraju.lk`        |
+| `FTP_USERNAME` | `cicd@goviraju.lk` (its directory is `public_html`)|
 | `FTP_PASSWORD` | that account's password                            |
 | `DEPLOY_TOKEN` | any long random string; it protects `_deploy.php`  |
 

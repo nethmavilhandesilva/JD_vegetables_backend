@@ -6,7 +6,7 @@ name: Deploy backend to cPanel
 #
 # Repository secrets (Settings > Secrets and variables > Actions > Secrets):
 #   FTP_SERVER    ftp.goviraju.lk
-#   FTP_USERNAME  deploy2@goviraju.lk
+#   FTP_USERNAME  cicd@goviraju.lk (an FTP account whose directory is public_html)
 #   FTP_PASSWORD  the FTP account's password
 #   DEPLOY_TOKEN  any long random string; protects _deploy.php
 # Optional repository variable (same page > Variables):
@@ -108,9 +108,12 @@ jobs:
           elif printf '%s\n' "$listing" | grep -qx "$APP_DIR"; then
             remote_dir="$APP_DIR"
             echo "FTP home is public_html; deploying to $remote_dir"
-          else
+          elif printf '%s\n' "$listing" | grep -qx 'artisan'; then
             remote_dir="."
-            echo "FTP home contains neither public_html nor ${APP_DIR}; assuming the home is the app folder itself"
+            echo "FTP home is the app folder itself; deploying into it"
+          else
+            remote_dir="$APP_DIR"
+            echo "FTP home looks like public_html without the app folder yet; creating and deploying to $remote_dir"
           fi
 
           echo "host=$tls_host" >> "$GITHUB_OUTPUT"
