@@ -9,6 +9,8 @@ name: Deploy backend to cPanel
 #   FTP_USERNAME  cicd@goviraju.lk (an FTP account whose directory is public_html)
 #   FTP_PASSWORD  the FTP account's password
 #   DEPLOY_TOKEN  any long random string; protects _deploy.php
+#   PRODUCTION_ENV  (optional) the full production .env; uploaded only when the
+#                   server has no .env yet, never overwritten afterwards
 # Optional repository variable (same page > Variables):
 #   FTP_REMOTE_DIR  folder relative to the FTP account's home when auto-detection
 #                   picks the wrong one, e.g. "public_html/JD_vegetables_backend" or "."
@@ -119,6 +121,35 @@ jobs:
           echo "host=$tls_host" >> "$GITHUB_OUTPUT"
           echo "remote_dir=$remote_dir" >> "$GITHUB_OUTPUT"
 
+      - name: Make sure the server has a .env
+        env:
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+          FTP_HOST: ${{ steps.ftp.outputs.host }}
+          REMOTE_DIR: ${{ steps.ftp.outputs.remote_dir }}
+        run: |
+          user=$(printf '%s' "$FTP_USERNAME" | tr -d '[:space:]')
+          url="ftp://${FTP_HOST}/${REMOTE_DIR}/.env"
+          # Fetch one byte: succeeds only when the file exists (dotfiles are hidden from listings)
+          if curl --silent --ssl-reqd --max-time 60 --range 0-0 -o /dev/null \
+               --user "${user}:${FTP_PASSWORD}" "$url"; then
+            echo "The server already has ${REMOTE_DIR}/.env; leaving it untouched"
+          elif [ -n "$PRODUCTION_ENV" ]; then
+            printf '%s\n' "$PRODUCTION_ENV" > production.env
+            if ! grep -q '^APP_KEY=base64:' production.env || ! grep -q '^DB_CONNECTION=' production.env; then
+              echo "::error::The PRODUCTION_ENV secret must be a complete .env file with APP_KEY and DB_CONNECTION lines."
+              exit 1
+            fi
+            curl --fail --silent --show-error --ssl-reqd --ftp-create-dirs --max-time 120 \
+              --user "${user}:${FTP_PASSWORD}" -T production.env "$url"
+            rm production.env
+            echo "No .env on the server yet; created ${REMOTE_DIR}/.env from the PRODUCTION_ENV secret"
+          else
+            echo "::error::The server has no ${REMOTE_DIR}/.env, so Laravel has no database settings. Either add a PRODUCTION_ENV secret containing the whole production .env file (it is uploaded once and never overwritten), or create the .env in cPanel File Manager, then re-run this workflow."
+            exit 1
+          fi
+
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
@@ -152,7 +183,7 @@ jobs:
         run: |
           zip -qr deploy.zip . \
             -x '.git/*' '.github/*' 'node_modules/*' 'tests/*' \
-               '.env' '.env.*' '*.DS_Store' 'public/error_log' 'deploy.zip'
+               '.env' '.env.*' 'database/*.sqlite' '*.DS_Store' 'public/error_log' 'deploy.zip'
           ls -lh deploy.zip
 
       - name: Prepare deploy script

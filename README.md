@@ -76,6 +76,11 @@ Repository secrets (GitHub > Settings > Secrets and variables > Actions):
 | `FTP_USERNAME` | `cicd@goviraju.lk` (its directory is `public_html`)|
 | `FTP_PASSWORD` | that account's password                            |
 | `DEPLOY_TOKEN` | any long random string; it protects `_deploy.php`  |
+| `PRODUCTION_ENV` | optional: the complete production `.env` file. It is uploaded only when the server folder has no `.env` yet and is never overwritten afterwards, so later changes are made on the server. |
+
+The server needs a `.env` with the production database settings before the first deploy can
+migrate. Either add it as the `PRODUCTION_ENV` secret or create it in cPanel File Manager
+inside `public_html/JD_vegetables_backend`.
 
 If the FTP account's home folder is not the cPanel root or `public_html`, set the repository
 variable `FTP_REMOTE_DIR` to the app folder relative to that home (for example `.` when the

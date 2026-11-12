@@ -20,6 +20,12 @@ ignore_user_abort(true);
 $base = __DIR__;
 $zipFile = $base . '/deploy.zip';
 
+// Without a .env Laravel would silently fall back to sqlite and migrate an empty file
+if (! is_file($base . '/.env')) {
+    http_response_code(500);
+    exit("No .env file in " . basename($base) . " on the server. Create it with the production database settings (or add the PRODUCTION_ENV secret) and deploy again.\n");
+}
+
 if (! is_file($zipFile)) {
     http_response_code(500);
     exit("deploy.zip not found\n");
