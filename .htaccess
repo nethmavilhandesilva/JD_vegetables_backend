@@ -1,4 +1,4 @@
-# Serves the app from public/ when reached via goviraju.lk/shantha_backend
+# Serves the app from public/ when reached via goviraju.lk/JD_vegetables_backend
 # and keeps .env, vendor, storage etc. from being downloadable.
 <IfModule mod_rewrite.c>
     RewriteEngine On

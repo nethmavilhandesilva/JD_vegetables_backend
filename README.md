@@ -59,3 +59,25 @@ If you discover a security vulnerability within Laravel, please send an e-mail t
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+
+## Deployment
+
+Every push to `main` runs the GitHub Actions workflow in `.github/workflows/deploy.yml`.
+It builds a production release (Composer without dev packages, Vite assets), uploads it over
+FTP with TLS to `public_html/JD_vegetables_backend` on goviraju.lk, and then calls
+`https://goviraju.lk/JD_vegetables_backend/_deploy.php`, which unzips the release, runs the
+safe migrations and clears the caches. The server's `.env` is never uploaded or changed.
+
+Repository secrets (GitHub > Settings > Secrets and variables > Actions):
+
+| Secret         | Value                                              |
+| -------------- | -------------------------------------------------- |
+| `FTP_SERVER`   | `ftp.goviraju.lk`                                  |
+| `FTP_USERNAME` | the FTP account, e.g. `deploy2@goviraju.lk`        |
+| `FTP_PASSWORD` | that account's password                            |
+| `DEPLOY_TOKEN` | any long random string; it protects `_deploy.php`  |
+
+If the FTP account's home folder is not the cPanel root or `public_html`, set the repository
+variable `FTP_REMOTE_DIR` to the app folder relative to that home (for example `.` when the
+account's home is the app folder itself). The workflow log says which folder it chose, and a
+failed run names the secret or setting to fix.

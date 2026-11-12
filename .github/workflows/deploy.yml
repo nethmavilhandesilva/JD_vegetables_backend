@@ -1,5 +1,18 @@
 name: Deploy backend to cPanel
 
+# Every push to main builds a production release (composer --no-dev, Vite assets),
+# uploads it over FTP (TLS) to public_html/JD_vegetables_backend on goviraju.lk and
+# runs _deploy.php there to unzip it, migrate and clear caches.
+#
+# Repository secrets (Settings > Secrets and variables > Actions > Secrets):
+#   FTP_SERVER    ftp.goviraju.lk
+#   FTP_USERNAME  deploy2@goviraju.lk
+#   FTP_PASSWORD  the FTP account's password
+#   DEPLOY_TOKEN  any long random string; protects _deploy.php
+# Optional repository variable (same page > Variables):
+#   FTP_REMOTE_DIR  folder relative to the FTP account's home when auto-detection
+#                   picks the wrong one, e.g. "public_html/JD_vegetables_backend" or "."
+
 on:
   push:
     branches: [main]
@@ -10,8 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REMOTE_DIR: shantha_backend
-  DEPLOY_URL: https://goviraju.lk/shantha_backend/_deploy.php
+  APP_DIR: JD_vegetables_backend
+  DEPLOY_URL: https://goviraju.lk/JD_vegetables_backend/_deploy.php
 
 jobs:
   deploy:
@@ -20,6 +33,88 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          missing=""
+          for name in FTP_SERVER FTP_USERNAME FTP_PASSWORD DEPLOY_TOKEN; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing. Add them under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Connect to FTP server
+        id: ftp
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_REMOTE_DIR: ${{ vars.FTP_REMOTE_DIR }}
+        run: |
+          # Tolerate stray whitespace, ftp:// prefix or trailing slash in the secrets
+          host=$(printf '%s' "$FTP_SERVER" | tr -d '[:space:]' | sed -E 's#^[a-z]+://##; s#/+$##')
+          user=$(printf '%s' "$FTP_USERNAME" | tr -d '[:space:]')
+
+          list_root() {
+            curl --silent --show-error --ssl-reqd --max-time 60 --list-only \
+              --user "${user}:${FTP_PASSWORD}" "ftp://$1/"
+          }
+
+          tls_host="$host"
+          set +e
+          listing=$(list_root "$host" 2>&1); rc=$?
+          set -e
+
+          if [ "$rc" -eq 60 ]; then
+            # Shared cPanel servers present a certificate for the server's own hostname,
+            # not for ftp.<domain>. Use that name only when it points at the same machine,
+            # so the connection stays fully verified.
+            cert_name=$(echo | openssl s_client -starttls ftp -connect "${host}:21" -servername "$host" 2>/dev/null \
+              | openssl x509 -noout -subject -nameopt RFC2253 | sed -n 's/.*CN=\([^,]*\).*/\1/p')
+            host_ip=$(getent ahostsv4 "$host" | awk '{print $1}' | sort -u | head -1)
+            cert_ip=$(getent ahostsv4 "$cert_name" | awk '{print $1}' | sort -u | head -1)
+            if [ -n "$cert_name" ] && [ -n "$host_ip" ] && [ "$host_ip" = "$cert_ip" ]; then
+              echo "The certificate on $host is issued for $cert_name (same server, $host_ip); connecting as $cert_name"
+              tls_host="$cert_name"
+              set +e
+              listing=$(list_root "$tls_host" 2>&1); rc=$?
+              set -e
+            else
+              echo "::error::The TLS certificate on $host is for '$cert_name', which does not resolve to the same server. Set the FTP_SERVER secret to the hostname shown in cPanel's FTP settings."
+              exit 1
+            fi
+          fi
+
+          case "$rc" in
+            0) ;;
+            67) echo "::error::FTP login rejected for $user (530). Check the FTP_USERNAME and FTP_PASSWORD secrets against cPanel > FTP Accounts."; exit 1 ;;
+            *) echo "::error::Could not connect to ftp://$tls_host/ (curl exit $rc): $listing"; exit 1 ;;
+          esac
+
+          # Where the app folder is, relative to the FTP account's home
+          if [ -n "$FTP_REMOTE_DIR" ]; then
+            remote_dir=$(printf '%s' "$FTP_REMOTE_DIR" | tr -d '[:space:]' | sed -E 's#^/+##; s#/+$##')
+            echo "Using FTP_REMOTE_DIR variable: $remote_dir"
+          elif printf '%s\n' "$listing" | grep -qx 'public_html'; then
+            remote_dir="public_html/${APP_DIR}"
+            echo "FTP home is the cPanel account root; deploying to $remote_dir"
+          elif printf '%s\n' "$listing" | grep -qx "$APP_DIR"; then
+            remote_dir="$APP_DIR"
+            echo "FTP home is public_html; deploying to $remote_dir"
+          else
+            remote_dir="."
+            echo "FTP home contains neither public_html nor ${APP_DIR}; assuming the home is the app folder itself"
+          fi
+
+          echo "host=$tls_host" >> "$GITHUB_OUTPUT"
+          echo "remote_dir=$remote_dir" >> "$GITHUB_OUTPUT"
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
@@ -64,26 +159,30 @@ jobs:
 
       - name: Upload via FTP
         env:
-          FTP_SERVER: ${{ secrets.FTP_SERVER }}
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_HOST: ${{ steps.ftp.outputs.host }}
+          REMOTE_DIR: ${{ steps.ftp.outputs.remote_dir }}
         run: |
-          # Tolerate stray whitespace, ftp:// prefix or trailing slash in the secret
-          FTP_SERVER=$(printf '%s' "$FTP_SERVER" | tr -d '[:space:]' | sed -E 's#^[a-z]+://##; s#/+$##')
-          FTP_USERNAME=$(printf '%s' "$FTP_USERNAME" | tr -d '[:space:]')
-          if [ -z "$FTP_SERVER" ]; then
-            echo "::error::FTP_SERVER secret is empty"
-            exit 1
-          fi
+          user=$(printf '%s' "$FTP_USERNAME" | tr -d '[:space:]')
           for f in deploy.zip _deploy.php; do
-            curl --fail --silent --show-error --ssl-reqd --ftp-create-dirs \
-              --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
-              -T "$f" "ftp://${FTP_SERVER}/${REMOTE_DIR}/$f"
+            echo "Uploading $f to ${REMOTE_DIR}/"
+            curl --fail --silent --show-error --ssl-reqd --ftp-create-dirs --max-time 1200 \
+              --user "${user}:${FTP_PASSWORD}" \
+              -T "$f" "ftp://${FTP_HOST}/${REMOTE_DIR}/$f"
           done
 
       - name: Extract and run migrations on server
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          REMOTE_DIR: ${{ steps.ftp.outputs.remote_dir }}
         run: |
-          curl --fail-with-body --silent --show-error --max-time 600 \
-            -X POST -H "X-Deploy-Token: ${DEPLOY_TOKEN}" "${DEPLOY_URL}"
+          status=$(curl --silent --show-error --max-time 600 -o deploy-output.txt -w '%{http_code}' \
+            -X POST -H "X-Deploy-Token: ${DEPLOY_TOKEN}" "${DEPLOY_URL}") || true
+          cat deploy-output.txt 2>/dev/null || true
+          case "$status" in
+            200) ;;
+            404) echo "::error::${DEPLOY_URL} was not found after uploading to '${REMOTE_DIR}', so that folder is not the one served at goviraju.lk/${APP_DIR}. Set the FTP_REMOTE_DIR repository variable to the right path (relative to the FTP account's home)."; exit 1 ;;
+            403) echo "::error::_deploy.php rejected the DEPLOY_TOKEN. Re-run the workflow; if it keeps failing, re-save the DEPLOY_TOKEN secret."; exit 1 ;;
+            *) echo "::error::Server-side deploy failed (HTTP ${status:-no response})"; exit 1 ;;
+          esac
