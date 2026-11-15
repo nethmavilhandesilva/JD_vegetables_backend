@@ -660,91 +660,174 @@ public function grnReport2(Request $request)
         ]);
     }
 
- public function salesReport(Request $request)
-{
-    // Log all incoming parameters
-    \Log::info('Sales Report Request:', [
-        'all_params' => $request->all(),
-        'transaction_type' => $request->transaction_type,
-        'bill_status' => $request->bill_status,
-        'start_date' => $request->start_date,
-        'end_date' => $request->end_date,
-        'supplier_code' => $request->supplier_code,
-        'item_code' => $request->item_code,
-        'customer_code' => $request->customer_code,
-        'bill_no' => $request->bill_no
-    ]);
+ /**
+     * Sales report (customer side).
+     *
+     * Data source:
+     *  - No date filter  -> today's `sales` table.
+     *  - Any date filter -> `sales_histories` (records moved there at day end).
+     *
+     * Filters (all optional): start_date, end_date (Y-m-d), customer_code, item_code,
+     * supplier_code, bill_no, transaction_type (cash|credit), bill_status (printed|not_printed).
+     *
+     * Line total, the same as the printed customer bill:
+     *   weight x price_per_kg + packs x CustomerPackCost + Kuliya
+     *
+     * Rows are capped at SALES_REPORT_MAX_ROWS; the summary always covers every
+     * matching record, so totals stay correct even when the rows are truncated.
+     */
+    private const SALES_REPORT_MAX_ROWS = 20000;
 
-    // Your existing logic...
-    $useHistory = $request->filled('start_date') || $request->filled('end_date');
+    public function salesReport(Request $request)
+    {
+        $validated = $request->validate([
+            'start_date'       => 'nullable|date_format:Y-m-d',
+            'end_date'         => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
+            'customer_code'    => 'nullable|string|max:100',
+            'item_code'        => 'nullable|string|max:100',
+            'supplier_code'    => 'nullable|string|max:100',
+            'bill_no'          => 'nullable|string|max:100',
+            'transaction_type' => 'nullable|in:cash,credit',
+            'bill_status'      => 'nullable|in:printed,not_printed',
+        ]);
 
-    $query = $useHistory
-        ? SalesHistory::query()
-        : Sale::query();
+        $useHistory = $request->filled('start_date') || $request->filled('end_date');
+        $model = $useHistory ? new SalesHistory() : new Sale();
+        $table = $model->getTable();
 
-    $query->where('Processed', 'Y');
+        $query = $model->newQuery()->where('Processed', 'Y');
 
-    // Apply filters...
-    if ($request->filled('supplier_code')) {
-        $query->where('supplier_code', $request->supplier_code);
-    }
-
-    if ($request->filled('item_code')) {
-        $query->where('item_code', $request->item_code);
-    }
-
-    if ($request->filled('customer_code')) {
-        $query->where('customer_code', $request->customer_code);
-    }
-
-    if ($request->filled('bill_no')) {
-        $query->where('bill_no', $request->bill_no);
-    }
-
-    // New filter for transaction type (Credit/Cash)
-    if ($request->filled('transaction_type')) {
-        \Log::info('Applying transaction_type filter:', ['value' => $request->transaction_type]);
-        
-        if ($request->transaction_type === 'credit') {
-            $query->where('credit_transaction', 'Y');
-        } elseif ($request->transaction_type === 'cash') {
-            $query->where('credit_transaction', 'N');
+        if ($request->filled('customer_code')) {
+            $query->whereRaw('UPPER(customer_code) = ?', [strtoupper(trim($validated['customer_code']))]);
         }
-    }
-
-    // New filter for bill printed status
-    if ($request->filled('bill_status')) {
-        \Log::info('Applying bill_status filter:', ['value' => $request->bill_status]);
-        
-        if ($request->bill_status === 'printed') {
-            $query->where('bill_printed', 'Y');
-        } elseif ($request->bill_status === 'not_printed') {
-            $query->where('bill_printed', 'N');
+        if ($request->filled('item_code')) {
+            $query->where('item_code', trim($validated['item_code']));
         }
+        if ($request->filled('supplier_code')) {
+            $query->whereRaw('UPPER(supplier_code) = ?', [strtoupper(trim($validated['supplier_code']))]);
+        }
+        if ($request->filled('bill_no')) {
+            $query->where('bill_no', trim($validated['bill_no']));
+        }
+        if ($request->filled('transaction_type')) {
+            $query->where('credit_transaction', $validated['transaction_type'] === 'credit' ? 'Y' : 'N');
+        }
+        if ($request->filled('bill_status')) {
+            $query->where('bill_printed', $validated['bill_status'] === 'printed' ? 'Y' : 'N');
+        }
+        if ($request->filled('start_date')) {
+            $query->where('Date', '>=', $validated['start_date']);
+        }
+        if ($request->filled('end_date')) {
+            $query->where('Date', '<=', $validated['end_date']);
+        }
+
+        // Summary over every matching record (not just the rows returned)
+        $lineValue  = 'COALESCE(weight,0) * COALESCE(price_per_kg,0)';
+        $lineBags   = 'COALESCE(packs,0) * COALESCE(CustomerPackCost,0)';
+        $lineKuliya = 'COALESCE(Kuliya,0)';
+        $summaryRow = (clone $query)->selectRaw("
+                COUNT(*) AS record_count,
+                COUNT(DISTINCT UPPER(customer_code)) AS customer_count,
+                COUNT(DISTINCT CONCAT(UPPER(COALESCE(customer_code,'')), '|', COALESCE(Date,''), '|', COALESCE(bill_no,''))) AS bill_count,
+                COUNT(DISTINCT item_code) AS item_count,
+                COALESCE(SUM(weight),0) AS total_weight,
+                COALESCE(SUM(packs),0) AS total_packs,
+                COALESCE(SUM($lineValue),0) AS items_value,
+                COALESCE(SUM($lineBags),0) AS bag_cost,
+                COALESCE(SUM($lineKuliya),0) AS kuliya,
+                MIN(Date) AS first_date,
+                MAX(Date) AS last_date
+            ")->first();
+
+        $summary = [
+            'record_count'   => (int) $summaryRow->record_count,
+            'customer_count' => (int) $summaryRow->customer_count,
+            'bill_count'     => (int) $summaryRow->bill_count,
+            'item_count'     => (int) $summaryRow->item_count,
+            'total_weight'   => round((float) $summaryRow->total_weight, 3),
+            'total_packs'    => (int) $summaryRow->total_packs,
+            'items_value'    => round((float) $summaryRow->items_value, 2),
+            'bag_cost'       => round((float) $summaryRow->bag_cost, 2),
+            'kuliya'         => round((float) $summaryRow->kuliya, 2),
+            'first_date'     => $summaryRow->first_date,
+            'last_date'      => $summaryRow->last_date,
+        ];
+        $summary['grand_total'] = round($summary['items_value'] + $summary['bag_cost'] + $summary['kuliya'], 2);
+
+        $salesData = $query
+            ->select([
+                'id', 'Date', 'customer_code', 'customer_name', 'bill_no', 'item_code', 'item_name',
+                'supplier_code', 'weight', 'price_per_kg', 'packs', 'CustomerPackCost', 'Kuliya',
+                'total', 'bill_printed', 'credit_transaction',
+            ])
+            ->orderBy('Date', 'DESC')
+            ->orderBy('customer_code')
+            ->orderBy('bill_no')
+            ->orderBy('id')
+            ->limit(self::SALES_REPORT_MAX_ROWS)
+            ->get();
+
+        return response()->json([
+            'salesData' => $salesData,
+            'summary'   => $summary,
+            'source'    => $useHistory ? 'history' : 'sales',
+            'table'     => $table,
+            'truncated' => $summary['record_count'] > $salesData->count(),
+            'max_rows'  => self::SALES_REPORT_MAX_ROWS,
+            'filters'   => $validated,
+        ]);
     }
 
-    if ($request->filled('start_date') && $request->filled('end_date')) {
-        $query->whereBetween('Date', [$request->start_date, $request->end_date]);
-    } elseif ($request->filled('start_date')) {
-        $query->where('Date', '>=', $request->start_date);
-    } elseif ($request->filled('end_date')) {
-        $query->where('Date', '<=', $request->end_date);
+    /**
+     * Options for the sales report filters: customer codes and suppliers seen in
+     * today's sales and the sales history, plus the item master list.
+     */
+    public function salesReportFilterOptions()
+    {
+        $customerCodes = Sale::query()->whereNotNull('customer_code')->where('customer_code', '<>', '')
+            ->distinct()->pluck('customer_code')
+            ->merge(SalesHistory::query()->whereNotNull('customer_code')->where('customer_code', '<>', '')
+                ->distinct()->pluck('customer_code'))
+            ->map(fn ($c) => strtoupper(trim($c)))
+            ->unique()->sort()->values();
+
+        $names = \App\Models\Customer::query()
+            ->whereIn(\DB::raw('UPPER(short_name)'), $customerCodes->all())
+            ->pluck('name', 'short_name')
+            ->mapWithKeys(fn ($name, $code) => [strtoupper(trim($code)) => $name]);
+
+        $customers = $customerCodes->map(fn ($code) => [
+            'code' => $code,
+            'name' => $names[$code] ?? null,
+        ])->values();
+
+        $supplierCodes = Sale::query()->whereNotNull('supplier_code')->where('supplier_code', '<>', '')
+            ->distinct()->pluck('supplier_code')
+            ->merge(SalesHistory::query()->whereNotNull('supplier_code')->where('supplier_code', '<>', '')
+                ->distinct()->pluck('supplier_code'))
+            ->map(fn ($c) => strtoupper(trim($c)))
+            ->unique()->sort()->values();
+
+        $supplierNames = Supplier::query()->pluck('name', 'code')
+            ->mapWithKeys(fn ($name, $code) => [strtoupper(trim($code)) => $name]);
+
+        $suppliers = $supplierCodes->map(fn ($code) => [
+            'code' => $code,
+            'name' => $supplierNames[$code] ?? null,
+        ])->values();
+
+        $items = Item::query()->select('no', 'type')->orderBy('no')->get()
+            ->map(fn ($item) => ['code' => (string) $item->no, 'name' => $item->type])
+            ->values();
+
+        return response()->json([
+            'customers' => $customers,
+            'suppliers' => $suppliers,
+            'items'     => $items,
+        ]);
     }
 
-    $query->orderBy('id', 'DESC');
-    
-    // Log the SQL query for debugging
-    \Log::info('SQL Query:', ['sql' => $query->toSql(), 'bindings' => $query->getBindings()]);
-    
-    $salesData = $query->get();
-    
-    \Log::info('Records found:', ['count' => $salesData->count()]);
-
-    return response()->json([
-        'salesData' => $salesData,
-        'filters' => $request->all()
-    ]);
-}
     public function grnReport(Request $request)
     {
         $code = $request->input('code');

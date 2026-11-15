@@ -107,6 +107,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/bill-numbers', [ReportController::class, 'getBillNumbers']);
     Route::get('/company-info', [ReportController::class, 'getCompanyInfo']);
     Route::get('/sales-report', [ReportController::class, 'salesReport']);
+    Route::get('/sales-report/filter-options', [ReportController::class, 'salesReportFilterOptions']);
 
     Route::prefix('reports')->group(function () {
         Route::post('/generate', [ReportController::class, 'generateReport']);
