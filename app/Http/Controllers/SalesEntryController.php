@@ -959,8 +959,8 @@ private function calculateKuliya($itemCode, $itemName, $weight)
         return 1.50;
     }
 
-    // If item name contains "කෙසෙල්", kuliya = 1.50
-    if (str_contains($itemName, 'කෙසෙල්')) {
+    // Bananas: kuliya = 1.50. Item names may be Sinhala ("කෙසෙල්") or English ("Banana").
+    if (str_contains((string) $itemName, 'කෙසෙල්') || stripos((string) $itemName, 'banana') !== false) {
         return 1.50;
     }
 
