@@ -37,6 +37,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/tts/speak', [TtsController::class, 'synthesize']);
 
     Route::put('/sales/bulk-update-supplier', [SupplierController::class, 'bulkUpdateSupplier']);
+    // Supplier report: edit SupplierWeight / SupplierPricePerKg of sales records
+    Route::put('/sales/supplier-values', [SupplierController::class, 'updateSupplierValues']);
     // CUSTOMERS
     Route::get('/suppliers/loan-summary', [SupplierLoanController::class, 'getLoanTakenSummary']);
     Route::get('/customers', [CustomerController::class, 'apiIndex']);

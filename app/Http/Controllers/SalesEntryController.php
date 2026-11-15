@@ -278,6 +278,7 @@ class SalesEntryController extends Controller
 
                     $existingSale->update([
                         'weight' => $newWeight,
+                        'SupplierWeight' => $newWeight,
                         'packs' => $newPacks,
                         'total' => $newTotal,
                         'SupplierTotal' => 0,
@@ -805,6 +806,7 @@ class SalesEntryController extends Controller
                 'item_code' => $validatedData['item_code'],
                 'item_name' => $validatedData['item_name'],
                 'weight' => $validatedData['weight'],
+                'SupplierWeight' => $validatedData['weight'],
                 'packs' => $validatedData['packs'],
                 'price_per_kg' => $newPricePerKg,
                 'commission_amount' => $commissionAmount,
@@ -853,6 +855,7 @@ class SalesEntryController extends Controller
                     'CustomerPackCost' => $newBagPrice,
                     'Kuliya' => $kuliya,  // ← ADD THIS LINE
                     'total' => DB::raw("weight * $newPricePerKg + packs * $newBagPrice"),
+                    'SupplierWeight' => DB::raw('weight'),
                     'SupplierTotal' => DB::raw("weight * $supplierPricePerKg"),
                     'profit' => DB::raw("(weight * $newPricePerKg + packs * $newBagPrice) - (weight * $supplierPricePerKg)"),
                     'updated' => 'Y',

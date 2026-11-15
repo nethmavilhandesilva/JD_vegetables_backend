@@ -89,7 +89,10 @@ class Sale extends Model
         $pricePerKg = (float) ($this->price_per_kg ?? 0);
         $commission = Commission::amountFor($this->item_code, $this->supplier_code, $pricePerKg);
         $supplierPricePerKg = abs($pricePerKg - $commission);
-        $supplierTotal = (float) ($this->weight ?? 0) * $supplierPricePerKg;
+        // Supplier side uses SupplierWeight (editable from the supplier report),
+        // falling back to the customer weight.
+        $supplierWeight = (float) ($this->SupplierWeight ?? $this->weight ?? 0);
+        $supplierTotal = $supplierWeight * $supplierPricePerKg;
 
         $this->commission_amount = $commission;
         $this->SupplierPricePerKg = $supplierPricePerKg;

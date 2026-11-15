@@ -37,14 +37,24 @@ class SupplierController extends Controller
     }
 
     /**
-     * For suppliers in GRAM_DEDUCTION_SUPPLIERS only: drop the gram part of each
-     * sale's weight (12.500 kg -> 12 kg) and recalculate SupplierTotal on that
-     * whole-kg weight (12 x price). Other suppliers' records are left unchanged.
-     * Only the in-memory records are changed; the sales table keeps the real values.
+     * Prepare sales records for the supplier (farmer) bill. Only the in-memory
+     * records are changed; the sales table keeps the real values.
+     *
+     * - `weight` becomes the supplier-side weight (SupplierWeight, which can be
+     *   edited from the supplier report). The customer-side weight is kept in
+     *   `customer_weight`.
+     * - For suppliers in GRAM_DEDUCTION_SUPPLIERS only: drop the gram part of that
+     *   weight (12.500 kg -> 12 kg) and recalculate SupplierTotal on the whole-kg
+     *   weight (12 x price).
      */
     private function dropGramsFromWeights($records)
     {
         return $records->each(function ($record) {
+            $record->setAttribute('customer_weight', $record->weight);
+            if ($record->SupplierWeight !== null) {
+                $record->weight = (float) $record->SupplierWeight;
+            }
+
             if (!$this->hasGramDeduction($record->supplier_code)) {
                 return;
             }
@@ -218,6 +228,7 @@ class SupplierController extends Controller
             'customer_code',
             'item_name',
             'weight',
+                'SupplierWeight',
             'price_per_kg',
             'commission_amount',
             'total',
@@ -573,6 +584,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'customer_code',
                 'item_name',
                 'weight',
+                'SupplierWeight',
                 'price_per_kg',
                 'commission_amount',
                 'total', // Assuming this is for customer sale total
@@ -617,6 +629,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'customer_code',
                 'item_name',
                 'weight',
+                'SupplierWeight',
                 'price_per_kg',
                 'commission_amount',
                 'total', // Assuming this is for customer sale total
@@ -662,6 +675,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'customer_code',
                 'item_name',
                 'weight',
+                'SupplierWeight',
                 'price_per_kg',
                 'commission_amount',
                 'total', // Assuming this is for customer sale total
@@ -956,6 +970,72 @@ private function sendReprintSMS($data, $records, $token)
         throw $e;
     }
 }
+/**
+ * Update the supplier-side weight and/or price per kg of sales records from the
+ * supplier report, then recalculate the amounts derived from them:
+ *   SupplierTotal     = SupplierWeight x SupplierPricePerKg
+ *   profit            = total - SupplierTotal
+ *   commission_amount = price_per_kg - SupplierPricePerKg
+ *
+ * Body: { "updates": [ { "id": 1, "SupplierWeight": 12.5, "SupplierPricePerKg": 95 }, ... ] }
+ * Each update needs at least one of the two values.
+ */
+public function updateSupplierValues(Request $request)
+{
+    $validated = $request->validate([
+        'updates'                      => 'required|array|min:1',
+        'updates.*.id'                 => 'required|integer|exists:sales,id',
+        'updates.*.SupplierWeight'     => 'nullable|numeric|min:0',
+        'updates.*.SupplierPricePerKg' => 'nullable|numeric|min:0',
+    ]);
+
+    foreach ($validated['updates'] as $index => $update) {
+        if (!isset($update['SupplierWeight']) && !isset($update['SupplierPricePerKg'])) {
+            return response()->json([
+                'error' => "Update #{$index} needs SupplierWeight or SupplierPricePerKg."
+            ], 422);
+        }
+    }
+
+    try {
+        $sales = DB::transaction(function () use ($validated) {
+            $saved = [];
+            foreach ($validated['updates'] as $update) {
+                $sale = Sale::lockForUpdate()->findOrFail($update['id']);
+
+                if (isset($update['SupplierWeight'])) {
+                    $sale->SupplierWeight = (float) $update['SupplierWeight'];
+                }
+                if (isset($update['SupplierPricePerKg'])) {
+                    $sale->SupplierPricePerKg = (float) $update['SupplierPricePerKg'];
+                }
+
+                $supplierWeight = (float) ($sale->SupplierWeight ?? $sale->weight ?? 0);
+                $supplierPrice  = (float) ($sale->SupplierPricePerKg ?? 0);
+
+                $sale->SupplierTotal     = round($supplierWeight * $supplierPrice, 2);
+                $sale->profit            = round((float) ($sale->total ?? 0) - $sale->SupplierTotal, 2);
+                $sale->commission_amount = round((float) ($sale->price_per_kg ?? 0) - $supplierPrice, 2);
+
+                // supplier_code / item_code / price_per_kg are untouched, so the
+                // model's commission hook does not overwrite these values.
+                $sale->save();
+                $saved[] = $sale->fresh();
+            }
+            return $saved;
+        });
+
+        return response()->json([
+            'message'       => count($sales) . ' record(s) updated.',
+            'updated_count' => count($sales),
+            'data'          => $sales,
+        ], 200);
+    } catch (\Exception $e) {
+        \Log::error('updateSupplierValues failed', ['error' => $e->getMessage()]);
+        return response()->json(['error' => $e->getMessage()], 500);
+    }
+}
+
 public function bulkUpdateSupplier(Request $request)
 {
     $validated = $request->validate([
