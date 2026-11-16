@@ -763,7 +763,9 @@ public function store2(Request $request)
             $supplier = $this->findOrCreateSupplier($validated['code']);
             $supplier = $this->updateSupplierRow($supplier->code, [
                 'advance_amount' => round((float) $validated['advance_amount'], 2),
-                'advance_created_date' => $this->workingDate(),
+                // The live column is JSON (MariaDB checks json_valid), so the date is saved as
+                // a JSON string: "2026-11-16" with the quotes. The day-end process reads both forms.
+                'advance_created_date' => json_encode($this->workingDate()),
             ]);
         } catch (\Throwable $e) {
             \Log::error('Advance update failed', ['code' => $validated['code'], 'error' => $e->getMessage()]);

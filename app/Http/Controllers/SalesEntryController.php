@@ -1184,9 +1184,10 @@ private function calculateKuliya($packs): float
 
         // advance_created_date is a text column that can hold non-date values,
         // so match the date prefix instead of DATE() which errors in strict mode
-        // Advances dated on or before the processed day are cleared (substr: the column is text)
+        // Advances dated on or before the processed day are cleared. The column may hold a
+        // plain date or a JSON string ("2026-11-16" with quotes), so quotes are removed first.
         Supplier::whereNotNull('advance_created_date')
-            ->whereRaw('substr(advance_created_date, 1, 10) <= ?', [$processLogDate])
+            ->whereRaw("substr(replace(advance_created_date, '\"', ''), 1, 10) <= ?", [$processLogDate])
             ->update([
                 'advance_amount' => 0,
                 'advance_created_date' => null
