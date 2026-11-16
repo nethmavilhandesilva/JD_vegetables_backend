@@ -26,6 +26,7 @@ class NewSupplierBillController extends Controller
             'supplier_code' => 'nullable|string|max:50',
             'status'        => ['nullable', Rule::in(['unpaid', 'partial', 'paid'])],
             'search'        => 'nullable|string|max:100',
+            'print_status'  => ['nullable', Rule::in(['held', 'printed'])],
         ]);
 
         $query = NewSupplierBill::query();
@@ -41,6 +42,9 @@ class NewSupplierBillController extends Controller
         }
         if (! empty($data['status'])) {
             $query->where('status', $data['status']);
+        }
+        if (! empty($data['print_status'])) {
+            $query->where('is_printed', $data['print_status'] === 'printed');
         }
         if (! empty($data['search'])) {
             $term = '%' . $data['search'] . '%';
@@ -104,7 +108,7 @@ class NewSupplierBillController extends Controller
         $data = $this->validated($request);
 
         $bill = DB::transaction(function () use ($data, $request) {
-            $bill = NewSupplierBill::create($this->headerAttributes($data) + [
+            $bill = NewSupplierBill::create($this->headerAttributes($data) + $this->printAttributes($data, false) + [
                 'created_by' => optional($request->user())->id,
             ]);
             // Bill number from the auto id: unique without any race between users.
@@ -124,11 +128,21 @@ class NewSupplierBillController extends Controller
         $data = $this->validated($request);
 
         DB::transaction(function () use ($data, $newSupplierBill) {
-            $newSupplierBill->update($this->headerAttributes($data));
+            // A printed bill stays printed; a held bill becomes printed when saved with print=true.
+            $newSupplierBill->update($this->headerAttributes($data) + $this->printAttributes($data, $newSupplierBill->is_printed));
             $newSupplierBill->items()->delete();
             $newSupplierBill->items()->createMany($data['lines']);
         });
 
+        return response()->json($newSupplierBill->fresh()->load('items'));
+    }
+
+    /** Mark a held bill as printed (used when a saved bill is printed from the list). */
+    public function markPrinted(NewSupplierBill $newSupplierBill)
+    {
+        if (! $newSupplierBill->is_printed) {
+            $newSupplierBill->update(['is_printed' => true, 'printed_at' => now()]);
+        }
         return response()->json($newSupplierBill->fresh()->load('items'));
     }
 
@@ -153,6 +167,7 @@ class NewSupplierBillController extends Controller
             'deduction_note'       => 'nullable|string|max:255',
             'paid_amount'          => 'nullable|numeric|min:0',
             'notes'                => 'nullable|string|max:2000',
+            'print'                => 'nullable|boolean',
             'items'                => 'required|array|min:1',
             'items.*.item_code'    => 'required|string|max:50',
             'items.*.item_name'    => 'nullable|string|max:255',
@@ -205,6 +220,15 @@ class NewSupplierBillController extends Controller
         ];
 
         return $data;
+    }
+
+    /** F5 hold => print=false (stays held); F4 print => print=true. */
+    private function printAttributes(array $data, bool $alreadyPrinted): array
+    {
+        if ($alreadyPrinted || empty($data['print'])) {
+            return $alreadyPrinted ? [] : ['is_printed' => false];
+        }
+        return ['is_printed' => true, 'printed_at' => now()];
     }
 
     private function headerAttributes(array $data): array

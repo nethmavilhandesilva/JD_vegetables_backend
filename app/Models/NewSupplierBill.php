@@ -15,7 +15,8 @@ class NewSupplierBill extends Model
     protected $fillable = [
         'bill_no', 'bill_date', 'supplier_code', 'supplier_name', 'reference_no',
         'total_packs', 'total_weight', 'gross_amount', 'deductions', 'deduction_note',
-        'net_amount', 'paid_amount', 'balance_amount', 'status', 'notes', 'created_by',
+        'net_amount', 'paid_amount', 'balance_amount', 'status', 'is_printed', 'printed_at',
+        'notes', 'created_by',
     ];
 
     protected $casts = [
@@ -27,6 +28,8 @@ class NewSupplierBill extends Model
         'net_amount'     => 'float',
         'paid_amount'    => 'float',
         'balance_amount' => 'float',
+        'is_printed'     => 'boolean',
+        'printed_at'     => 'datetime',
     ];
 
     public function items()
