@@ -9,7 +9,7 @@ class NewSupplierBillItem extends Model
     protected $table = 'new_supplier_bill_items';
 
     protected $fillable = [
-        'new_supplier_bill_id', 'item_code', 'item_name', 'packs', 'weight', 'price_per_kg', 'amount',
+        'new_supplier_bill_id', 'item_code', 'item_name', 'packs', 'weight', 'price_per_kg', 'amount', 'pack_weights',
     ];
 
     protected $casts = [
@@ -17,6 +17,7 @@ class NewSupplierBillItem extends Model
         'weight'       => 'float',
         'price_per_kg' => 'float',
         'amount'       => 'float',
+        'pack_weights' => 'array', // weight of each pack, when entered pack by pack
     ];
 
     public function bill()

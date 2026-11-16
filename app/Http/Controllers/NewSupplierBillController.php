@@ -174,6 +174,8 @@ class NewSupplierBillController extends Controller
             'items.*.packs'        => 'nullable|numeric|min:0',
             'items.*.weight'       => 'required|numeric|gt:0',
             'items.*.price_per_kg' => 'required|numeric|min:0',
+            'items.*.pack_weights'   => 'nullable|array|max:1000',
+            'items.*.pack_weights.*' => 'numeric|gt:0',
         ]);
 
         $lines = [];
@@ -185,6 +187,13 @@ class NewSupplierBillController extends Controller
             $weight = round((float) $line['weight'], 3);
             $price = round((float) $line['price_per_kg'], 2);
             $packs = round((float) ($line['packs'] ?? 0), 2);
+
+            // Entered pack by pack: the line is the sum of the pack weights, packs = how many
+            $packWeights = array_values(array_map(fn ($w) => round((float) $w, 3), $line['pack_weights'] ?? []));
+            if ($packWeights) {
+                $weight = round(array_sum($packWeights), 3);
+                $packs = count($packWeights);
+            }
             $amount = round($weight * $price, 2);
 
             $lines[] = [
@@ -194,6 +203,7 @@ class NewSupplierBillController extends Controller
                 'weight'       => $weight,
                 'price_per_kg' => $price,
                 'amount'       => $amount,
+                'pack_weights' => $packWeights ?: null,
             ];
 
             $totalWeight += $weight;
