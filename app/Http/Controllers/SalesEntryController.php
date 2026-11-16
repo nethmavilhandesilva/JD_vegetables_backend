@@ -223,7 +223,7 @@ class SalesEntryController extends Controller
             // --- KULIYA CALCULATION (USE CUSTOM VALUE IF PROVIDED) ---
             $kuliya = $request->filled('kuliya')
                 ? (float) $validated['kuliya']
-                : $this->calculateKuliya($validated['item_code'], $validated['item_name'], $incomingNetWeight);
+                : $this->calculateKuliya($numPacks);
 
             $billPrinted = $validated['bill_printed'] ?? null;
 
@@ -713,7 +713,7 @@ class SalesEntryController extends Controller
 
             $kuliya = $request->filled('kuliya')
                 ? (float) $validatedData['kuliya']
-                : $this->calculateKuliya($validatedData['item_code'], $validatedData['item_name'], $incomingNetWeight);
+                : $this->calculateKuliya($validatedData['packs']);
 
             // --- 5. Track Original for Adjustment Logs (Only if Printed) ---
             if ($originalData['bill_printed'] === 'Y') {
@@ -894,32 +894,16 @@ class SalesEntryController extends Controller
         return Commission::amountFor($itemCode, $supplierCode, $pricePerKg);
     }
 
-private function calculateKuliya($itemCode, $itemName, $weight)
+/** Kuliya charged for each bag (pack). */
+private const KULIYA_PER_BAG = 40;
+
+/**
+ * Kuliya = number of bags x 40, for every item.
+ * Used only when no kuliya is sent: a value typed in Sales Entry always wins.
+ */
+private function calculateKuliya($packs): float
 {
-    // If item code is CAA, kuliya = 1.50
-    if ($itemCode === 'CAA') {
-        return 1.50;
-    }
-
-    // Bananas: kuliya = 1.50. Item names may be Sinhala ("කෙසෙල්") or English ("Banana").
-    if (str_contains((string) $itemName, 'කෙසෙල්') || stripos((string) $itemName, 'banana') !== false) {
-        return 1.50;
-    }
-
-    // Weight-based kuliya calculation
-    if ($weight < 10) {
-        return 0;
-    } elseif ($weight >= 10 && $weight <= 19) {
-        return 20;
-    } elseif ($weight >= 20 && $weight <= 49) {
-        return 40;
-    } elseif ($weight >= 50 && $weight <= 99) {
-        return 50;
-    } elseif ($weight >= 100) {
-        return 1;
-    }
-
-    return 0;
+    return round(max(0, (float) $packs) * self::KULIYA_PER_BAG, 2);
 }
     public function calculateKuliyaApi(Request $request)
     {
@@ -931,16 +915,7 @@ private function calculateKuliya($itemCode, $itemName, $weight)
             'bag_real_weight' => 'nullable|numeric',
         ]);
 
-        $bagWeightPerUnit = (float) ($request->bag_real_weight ?? 0);
-        $numPacks = (int) $request->packs;
-        $totalBagWeight = $bagWeightPerUnit * $numPacks;
-        $incomingNetWeight = (float) $request->weight - $totalBagWeight;
-
-        $kuliya = $this->calculateKuliya(
-            $request->item_code,
-            $request->item_name,
-            $incomingNetWeight
-        );
+        $kuliya = $this->calculateKuliya($request->packs);
 
         return response()->json(['kuliya' => $kuliya]);
     }
