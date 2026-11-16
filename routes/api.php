@@ -15,6 +15,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SalesEntryController;
 use App\Http\Controllers\CommissionController;
 use App\Http\Controllers\NewSupplierBillController;
+use App\Http\Controllers\AccountsController;
 use App\Http\Controllers\TtsController;
 use App\Models\Setting;
 
@@ -53,6 +54,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/sales/todays-kuliya', [SalesEntryController::class, 'getTodaysKuliya']);
     //fetching sales to table bellow
     Route::get('/sales/all-sales-data', [SalesEntryController::class, 'getAllSales2']);
+
+    // ACCOUNTS (bottom bar): customers / suppliers from the sales table, workers data entry
+    Route::get('/accounts/customers', [AccountsController::class, 'customers']);
+    Route::get('/accounts/customers/{code}', [AccountsController::class, 'customerBills']);
+    Route::get('/accounts/suppliers', [AccountsController::class, 'suppliers']);
+    Route::get('/accounts/suppliers/{code}', [AccountsController::class, 'supplierBills']);
+    Route::get('/accounts/workers', [AccountsController::class, 'workers']);
+    Route::post('/accounts/workers', [AccountsController::class, 'storeWorker']);
+    Route::put('/accounts/workers/{worker}', [AccountsController::class, 'updateWorker']);
+    Route::delete('/accounts/workers/{worker}', [AccountsController::class, 'destroyWorker']);
 
     // NEW SUPPLIER BILLS dashboard (tables: new_supplier_bills, new_supplier_bill_items)
     Route::get('/new-supplier-bills/options', [NewSupplierBillController::class, 'options']);
