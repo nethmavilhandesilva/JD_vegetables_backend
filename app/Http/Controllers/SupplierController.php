@@ -394,10 +394,9 @@ public function generateFSeriesBill(): JsonResponse
             'bill_no'       => $finalBillNo,
             'sales_data'    => $salesRecords->toJson(),
             'advance_amount'=> $validated['advance_amount'],
-            'hire_amount'   => $validated['hire_amount'],
             'supplier_code' => $validated['supplier_code'],
             'created_at'    => now(),
-        ]);
+        ] + $this->linkHireField($validated['hire_amount']));
         \Log::info('Public link created', ['token' => $token]);
 
         // The advance and hire are deducted on this bill only: take them off the supplier
@@ -504,11 +503,12 @@ public function cancelPrint(Request $request)
 
         // The bill did not print: the supplier's advance and hire are still owed
         $v = $pending['validated'];
-        $supplier = Supplier::where('code', $v['supplier_code'])->lockForUpdate()->first();
+        $supplier = DB::table('suppliers')->where('code', $v['supplier_code'])->lockForUpdate()->first();
         if ($supplier) {
-            $supplier->advance_amount = (float) $supplier->advance_amount + (float) ($v['advance_amount'] ?? 0);
-            $supplier->hire_amount = (float) ($supplier->hire_amount ?? 0) + (float) ($v['hire_amount'] ?? 0);
-            $supplier->save();
+            $this->updateSupplierRow($supplier->code, [
+                'advance_amount' => (float) ($supplier->advance_amount ?? 0) + (float) ($v['advance_amount'] ?? 0),
+                'hire_amount' => (float) ($supplier->hire_amount ?? 0) + (float) ($v['hire_amount'] ?? 0),
+            ]);
         }
 
         $counter = SupplierBillNumber::where('id', 1)->lockForUpdate()->first();
@@ -759,11 +759,16 @@ public function store2(Request $request)
             'advance_amount' => 'required|numeric|min:0',
         ]);
 
-        $supplier = $this->findOrCreateSupplier($validated['code']);
-
-        $supplier->advance_amount = round((float) $validated['advance_amount'], 2);
-        $supplier->advance_created_date = $this->workingDate();
-        $supplier->save();
+        try {
+            $supplier = $this->findOrCreateSupplier($validated['code']);
+            $supplier = $this->updateSupplierRow($supplier->code, [
+                'advance_amount' => round((float) $validated['advance_amount'], 2),
+                'advance_created_date' => $this->workingDate(),
+            ]);
+        } catch (\Throwable $e) {
+            \Log::error('Advance update failed', ['code' => $validated['code'], 'error' => $e->getMessage()]);
+            return response()->json(['message' => 'Could not save the advance: ' . $e->getMessage()], 500);
+        }
 
         return response()->json([
             'message' => 'Supplier data saved successfully!',
@@ -782,10 +787,19 @@ public function updateHire(Request $request)
             'hire_amount' => 'required|numeric|min:0',
         ]);
 
-        $supplier = $this->findOrCreateSupplier($validated['code']);
+        if (!$this->supplierHasColumn('hire_amount')) {
+            return response()->json(['message' => 'The hire_amount column is missing: run database/sql/2026_11_16_supplier_hire_amount.sql in phpMyAdmin first.'], 500);
+        }
 
-        $supplier->hire_amount = round((float) $validated['hire_amount'], 2);
-        $supplier->save();
+        try {
+            $supplier = $this->findOrCreateSupplier($validated['code']);
+            $supplier = $this->updateSupplierRow($supplier->code, [
+                'hire_amount' => round((float) $validated['hire_amount'], 2),
+            ]);
+        } catch (\Throwable $e) {
+            \Log::error('Hire update failed', ['code' => $validated['code'], 'error' => $e->getMessage()]);
+            return response()->json(['message' => 'Could not save the hire amount: ' . $e->getMessage()], 500);
+        }
 
         return response()->json(['message' => 'Hire amount saved.', 'data' => $supplier], 200);
     }
@@ -809,29 +823,45 @@ public function billCharges($billNo)
  * code. Required columns of the suppliers table get a blank value (text '', number 0,
  * date today), so this works whatever extra columns the table has.
  */
-private function findOrCreateSupplier(string $code): Supplier
+private function findOrCreateSupplier(string $code): object
     {
         $code = strtoupper(trim($code));
-        $supplier = Supplier::where('code', $code)->first();
+        $supplier = DB::table('suppliers')->where('code', $code)->first();
         if ($supplier) {
             return $supplier;
         }
 
-        $attributes = ['code' => $code, 'name' => $code, 'advance_amount' => 0];
+        $attributes = ['code' => $code];
+        foreach (['name' => $code, 'advance_amount' => 0] as $column => $value) {
+            if ($this->supplierHasColumn($column)) {
+                $attributes[$column] = $value;
+            }
+        }
+        foreach (['created_at', 'updated_at'] as $column) {
+            if ($this->supplierHasColumn($column)) {
+                $attributes[$column] = now();
+            }
+        }
+
         try {
             foreach (\Illuminate\Support\Facades\Schema::getColumns('suppliers') as $column) {
                 $name = $column['name'];
                 if (array_key_exists($name, $attributes) || $column['nullable'] || $column['default'] !== null
-                    || !empty($column['auto_increment']) || in_array($name, ['id', 'created_at', 'updated_at'], true)) {
+                    || !empty($column['auto_increment']) || $name === 'id') {
                     continue;
                 }
                 $type = strtolower($column['type_name'] ?? '');
-                if (str_contains($type, 'int') || in_array($type, ['decimal', 'double', 'float', 'numeric', 'real'], true)) {
+                $fullType = strtolower($column['type'] ?? '');
+                if ($type === 'enum' && preg_match("/enum\('((?:[^']|'')*)'/", $fullType, $m)) {
+                    $attributes[$name] = str_replace("''", "'", $m[1]); // first allowed value
+                } elseif ($type === 'json') {
+                    $attributes[$name] = '[]';
+                } elseif (str_contains($type, 'int') || in_array($type, ['decimal', 'double', 'float', 'numeric', 'real', 'bit'], true)) {
                     $attributes[$name] = 0;
                 } elseif ($type === 'date') {
                     $attributes[$name] = now()->toDateString();
-                } elseif (str_contains($type, 'time')) {
-                    $attributes[$name] = now();
+                } elseif (str_contains($type, 'time') || $type === 'year') {
+                    $attributes[$name] = $type === 'year' ? (int) now()->format('Y') : now();
                 } else {
                     $attributes[$name] = '';
                 }
@@ -840,10 +870,9 @@ private function findOrCreateSupplier(string $code): Supplier
             \Log::warning('Could not read suppliers columns: ' . $e->getMessage());
         }
 
-        $supplier = new Supplier();
-        $supplier->forceFill($attributes)->save();
+        DB::table('suppliers')->insert($attributes);
 
-        return $supplier;
+        return DB::table('suppliers')->where('code', $code)->first();
     }
 
 /** Take the amounts deducted on a bill off the supplier (never below 0). */
@@ -852,16 +881,60 @@ private function useUpSupplierCharges(string $supplierCode, float $advance, floa
         if ($advance <= 0 && $hire <= 0) {
             return;
         }
-        $supplier = Supplier::where('code', $supplierCode)->lockForUpdate()->first();
+        $supplier = DB::table('suppliers')->where('code', $supplierCode)->lockForUpdate()->first();
         if (!$supplier) {
             return;
         }
-        $supplier->advance_amount = max(0, round((float) $supplier->advance_amount - $advance, 2));
-        $supplier->hire_amount = max(0, round((float) ($supplier->hire_amount ?? 0) - $hire, 2));
-        if ((float) $supplier->advance_amount <= 0) {
-            $supplier->advance_created_date = null;
+        $newAdvance = max(0, round((float) ($supplier->advance_amount ?? 0) - $advance, 2));
+        $fields = [
+            'advance_amount' => $newAdvance,
+            'hire_amount' => max(0, round((float) ($supplier->hire_amount ?? 0) - $hire, 2)),
+        ];
+        if ($newAdvance <= 0) {
+            $fields['advance_created_date'] = null;
         }
-        $supplier->save();
+        $this->updateSupplierRow($supplier->code, $fields);
+    }
+
+/** ['hire_amount' => x] for supplier_bill_links, or [] while that column is not added yet. */
+private function linkHireField(float $hire): array
+    {
+        static $hasColumn = null;
+        if ($hasColumn === null) {
+            $hasColumn = \Illuminate\Support\Facades\Schema::hasColumn('supplier_bill_links', 'hire_amount');
+        }
+        return $hasColumn ? ['hire_amount' => $hire] : [];
+    }
+
+/** Columns of the suppliers table (read once per request). */
+private function supplierColumnList(): array
+    {
+        static $columns = null;
+        if ($columns === null) {
+            $columns = array_map('strtolower', \Illuminate\Support\Facades\Schema::getColumnListing('suppliers'));
+        }
+        return $columns;
+    }
+
+private function supplierHasColumn(string $column): bool
+    {
+        return in_array(strtolower($column), $this->supplierColumnList(), true);
+    }
+
+/**
+ * Update a supplier row by code. Fields whose column does not exist are skipped (so a
+ * missing hire_amount / updated_at column never breaks printing). Returns the row.
+ */
+private function updateSupplierRow(string $code, array $fields): object
+    {
+        $fields = array_filter($fields, fn ($key) => $this->supplierHasColumn($key), ARRAY_FILTER_USE_KEY);
+        if ($this->supplierHasColumn('updated_at')) {
+            $fields['updated_at'] = now();
+        }
+        if ($fields) {
+            DB::table('suppliers')->where('code', $code)->update($fields);
+        }
+        return DB::table('suppliers')->where('code', $code)->first();
     }
 
 /** Date saved with an advance; the day-end process clears advances up to its date. */
@@ -956,10 +1029,9 @@ public function resendSupplierSMS(Request $request)
                 ->update([
                     'sales_data' => $salesRecords->toJson(),
                     'advance_amount' => $validated['advance_amount'],
-                    'hire_amount' => $validated['hire_amount'],
                     'supplier_code' => $validated['supplier_code'],
                     'updated_at' => now(),
-                ]);
+                ] + $this->linkHireField($validated['hire_amount']));
             
             $token = $existingLink->token;
             \Log::info('Updated existing bill link with current data', [
@@ -1013,11 +1085,10 @@ private function createNewBillLink($data, $records)
         'bill_no' => $data['bill_no'],
         'sales_data' => $records->toJson(),
         'advance_amount' => $data['advance_amount'],
-        'hire_amount' => (float) ($data['hire_amount'] ?? 0),
         'supplier_code' => $data['supplier_code'],
         'created_at' => now(),
         'updated_at' => now(),
-    ]);
+    ] + $this->linkHireField((float) ($data['hire_amount'] ?? 0)));
     
     return $token;
 }
