@@ -2,11 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Commission;
 use App\Models\Item;
 use App\Models\NewSupplierBill;
 use App\Models\Supplier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 /**
@@ -182,6 +184,8 @@ class NewSupplierBillController extends Controller
         $totalWeight = 0.0;
         $totalPacks = 0.0;
         $gross = 0.0;
+        $commission = 0.0;
+        $supplierCode = strtoupper(trim($data['supplier_code']));
 
         foreach ($data['items'] as $line) {
             $weight = round((float) $line['weight'], 3);
@@ -195,41 +199,91 @@ class NewSupplierBillController extends Controller
                 $packs = count($packWeights);
             }
             $amount = round($weight * $price, 2);
+            $itemCode = strtoupper(trim($line['item_code']));
 
-            $lines[] = [
-                'item_code'    => strtoupper(trim($line['item_code'])),
-                'item_name'    => $line['item_name'] ?? null,
-                'packs'        => $packs,
-                'weight'       => $weight,
-                'price_per_kg' => $price,
-                'amount'       => $amount,
-                'pack_weights' => $packWeights ?: null,
-            ];
+            // Commission per kg from the commission rules (same as Sales Entry); deducted from the supplier
+            $commissionPerKg = $this->commissionPerKg($itemCode, $supplierCode, $price);
+            $lineCommission = round($weight * $commissionPerKg, 2);
+
+            $lines[] = $this->onlyExistingColumns('new_supplier_bill_items', [
+                'item_code'         => $itemCode,
+                'item_name'         => $line['item_name'] ?? null,
+                'packs'             => $packs,
+                'weight'            => $weight,
+                'price_per_kg'      => $price,
+                'amount'            => $amount,
+                'pack_weights'      => $packWeights ?: null,
+                'commission_per_kg' => $commissionPerKg,
+                'commission_amount' => $lineCommission,
+            ]);
 
             $totalWeight += $weight;
             $totalPacks += $packs;
             $gross += $amount;
+            $commission += $lineCommission;
         }
 
         $gross = round($gross, 2);
+        $commission = round($commission, 2);
         $deductions = round((float) ($data['deductions'] ?? 0), 2);
-        $net = round($gross - $deductions, 2);
+        // Supplier is paid: gross - commission - other deductions
+        $net = round($gross - $commission - $deductions, 2);
         $paid = round((float) ($data['paid_amount'] ?? 0), 2);
         $balance = round($net - $paid, 2);
 
         $data['lines'] = $lines;
-        $data['totals'] = [
-            'total_weight'   => round($totalWeight, 3),
-            'total_packs'    => round($totalPacks, 2),
-            'gross_amount'   => $gross,
-            'deductions'     => $deductions,
-            'net_amount'     => $net,
-            'paid_amount'    => $paid,
-            'balance_amount' => $balance,
-            'status'         => $paid <= 0 ? 'unpaid' : ($balance > 0 ? 'partial' : 'paid'),
-        ];
+        $data['totals'] = $this->onlyExistingColumns('new_supplier_bills', [
+            'total_weight'      => round($totalWeight, 3),
+            'total_packs'       => round($totalPacks, 2),
+            'gross_amount'      => $gross,
+            'commission_amount' => $commission,
+            'deductions'        => $deductions,
+            'net_amount'        => $net,
+            'paid_amount'       => $paid,
+            'balance_amount'    => $balance,
+            'status'            => $paid <= 0 ? 'unpaid' : ($balance > 0 ? 'partial' : 'paid'),
+        ]);
 
         return $data;
+    }
+
+    /** Commission per kg for a line (0 when no rule applies or the rules cannot be read). */
+    private function commissionPerKg(string $itemCode, string $supplierCode, float $price): float
+    {
+        try {
+            return round((float) Commission::amountFor($itemCode, $supplierCode, $price), 2);
+        } catch (\Throwable $e) {
+            \Log::warning('New supplier bill commission lookup failed: ' . $e->getMessage());
+            return 0.0;
+        }
+    }
+
+    /** Commission per kg for the entry screen (shown while typing; the save recalculates it). */
+    public function commission(Request $request)
+    {
+        $data = $request->validate([
+            'item_code'     => 'required|string|max:50',
+            'supplier_code' => 'nullable|string|max:50',
+            'price_per_kg'  => 'required|numeric|min:0',
+        ]);
+
+        return response()->json([
+            'commission_per_kg' => $this->commissionPerKg(
+                strtoupper(trim($data['item_code'])),
+                strtoupper(trim((string) ($data['supplier_code'] ?? ''))),
+                (float) $data['price_per_kg']
+            ),
+        ]);
+    }
+
+    /** Drop fields whose column is not in the table yet (before the SQL file is imported). */
+    private function onlyExistingColumns(string $table, array $fields): array
+    {
+        static $columns = [];
+        if (!isset($columns[$table])) {
+            $columns[$table] = array_map('strtolower', Schema::getColumnListing($table));
+        }
+        return array_filter($fields, fn ($key) => in_array(strtolower($key), $columns[$table], true), ARRAY_FILTER_USE_KEY);
     }
 
     /** F5 hold => print=false (stays held); F4 print => print=true. */

@@ -67,6 +67,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // NEW SUPPLIER BILLS dashboard (tables: new_supplier_bills, new_supplier_bill_items)
     Route::get('/new-supplier-bills/options', [NewSupplierBillController::class, 'options']);
+    Route::get('/new-supplier-bills/commission', [NewSupplierBillController::class, 'commission']);
     Route::post('/new-supplier-bills/{newSupplierBill}/mark-printed', [NewSupplierBillController::class, 'markPrinted']);
     Route::apiResource('new-supplier-bills', NewSupplierBillController::class)
         ->parameters(['new-supplier-bills' => 'newSupplierBill']);

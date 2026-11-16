@@ -14,7 +14,7 @@ class NewSupplierBill extends Model
 
     protected $fillable = [
         'bill_no', 'bill_date', 'supplier_code', 'supplier_name', 'reference_no',
-        'total_packs', 'total_weight', 'gross_amount', 'deductions', 'deduction_note',
+        'total_packs', 'total_weight', 'gross_amount', 'commission_amount', 'deductions', 'deduction_note',
         'net_amount', 'paid_amount', 'balance_amount', 'status', 'is_printed', 'printed_at',
         'notes', 'created_by',
     ];
@@ -24,6 +24,7 @@ class NewSupplierBill extends Model
         'total_packs'    => 'float',
         'total_weight'   => 'float',
         'gross_amount'   => 'float',
+        'commission_amount' => 'float',
         'deductions'     => 'float',
         'net_amount'     => 'float',
         'paid_amount'    => 'float',
