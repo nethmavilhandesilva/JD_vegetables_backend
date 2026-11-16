@@ -29,6 +29,14 @@ use TextLK\SMS\TextLKSMSMessage;
 */
 class SalesEntryController extends Controller
 {
+    /**
+     * Today's sales for the Sales Entry screen (the sales table only holds the open day).
+     *
+     * The screen polls this every few seconds. It sends back the `version` it already has;
+     * when nothing changed the response is just {unchanged: true}, so polling stays cheap.
+     * Each sale is sent once (the old printed/unprinted copies and the unused customer
+     * relation tripled the payload), and nothing is written to the log per request.
+     */
     public function index(Request $request): JsonResponse
     {
         try {
@@ -38,37 +46,31 @@ class SalesEntryController extends Controller
                 return response()->json(['error' => 'Unauthorized'], 401);
             }
 
-            Log::info('SalesEntryController@index called', [
-                'db_id' => $currentUser->id,
-                'user_id' => $currentUser->user_id,
-                'role' => $currentUser->role,
-            ]);
-
-            // ✅ Start query
-            $query = Sale::with(['customer']);
+            $query = Sale::query();
 
             // 🔐 Apply filter ONLY for role = User
             if ($currentUser->role === 'User') {
                 $query->where('UniqueCode', $currentUser->user_id);
             }
 
-            // ✅ Execute query AFTER filtering
-            $sales = $query->get();
+            // Version = row count + highest id + latest change. Inserts, edits and deletes
+            // all move it. For a few seconds after any change the full list is always sent,
+            // so two edits inside the same second are never missed.
+            $stats = (clone $query)
+                ->selectRaw('COUNT(*) AS cnt, COALESCE(MAX(id), 0) AS max_id, MAX(updated_at) AS last_change')
+                ->first();
+            $version = $stats->cnt . '-' . $stats->max_id . '-' . ($stats->last_change ?? '0');
 
-            // ✅ Separate printed/unprinted (AFTER DB filtering)
-            $printedSales = $sales->where('bill_printed', 'Y')->values();
-            $unprintedSales = $sales->where('bill_printed', 'N')->values();
+            $recentlyChanged = $stats->last_change
+                && Carbon::parse($stats->last_change)->greaterThan(now()->subSeconds(3));
 
-            Log::info('SalesEntryController@index result', [
-                'total_sales' => $sales->count(),
-                'user_filter_applied' => $currentUser->role === 'User',
-                'filtered_user_id' => $currentUser->user_id,
-            ]);
+            if (!$recentlyChanged && $request->query('version') === $version) {
+                return response()->json(['unchanged' => true, 'version' => $version]);
+            }
 
             return response()->json([
-                'sales' => $sales,
-                'printed_sales' => $printedSales,
-                'unprinted_sales' => $unprintedSales,
+                'sales' => $query->orderBy('id')->get(),
+                'version' => $version,
             ]);
 
         } catch (\Exception $e) {
