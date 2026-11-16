@@ -667,6 +667,9 @@ class SalesEntryController extends Controller
             'bill_printed' => 'nullable|string|in:N,Y',
             'update_related_price' => 'nullable|boolean',
             'kuliya' => 'nullable|numeric',  // ← ADD THIS LINE
+            // Sales Entry shows separate entries of the same item/supplier/price as one row.
+            // Editing that row updates every entry; only the first one sends the admin SMS.
+            'group_follow_up' => 'nullable|boolean',
         ]);
 
         DB::beginTransaction();
@@ -846,7 +849,7 @@ class SalesEntryController extends Controller
             DB::commit();
 
             // --- 9. SEND DETAILED UPDATE NOTIFICATION SMS ---
-            try {
+            if (! $request->boolean('group_follow_up')) try {
                 $adminPhone = '94702758908';
                 $now = now()->format('Y-m-d H:i');
 
