@@ -14,6 +14,7 @@ use App\Http\Controllers\ReportController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SalesEntryController;
 use App\Http\Controllers\CommissionController;
+use App\Http\Controllers\NewSupplierBillController;
 use App\Http\Controllers\TtsController;
 use App\Models\Setting;
 
@@ -52,6 +53,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/sales/todays-kuliya', [SalesEntryController::class, 'getTodaysKuliya']);
     //fetching sales to table bellow
     Route::get('/sales/all-sales-data', [SalesEntryController::class, 'getAllSales2']);
+
+    // NEW SUPPLIER BILLS dashboard (tables: new_supplier_bills, new_supplier_bill_items)
+    Route::get('/new-supplier-bills/options', [NewSupplierBillController::class, 'options']);
+    Route::apiResource('new-supplier-bills', NewSupplierBillController::class)
+        ->parameters(['new-supplier-bills' => 'newSupplierBill']);
 
     // ITEMS
     Route::apiResource('items', ItemController::class);
