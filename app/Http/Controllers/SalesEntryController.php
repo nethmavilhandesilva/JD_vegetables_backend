@@ -233,70 +233,9 @@ class SalesEntryController extends Controller
                 'packs' => $numPacks
             ];
 
-            $shouldCheckForUpdate =
-                ($billPrinted === null || $billPrinted === 'N') &&
-                $pricePerKg == 0;
-
-            if ($shouldCheckForUpdate) {
-                $existingSale = Sale::where('customer_code', strtoupper($validated['customer_code']))
-                    ->where('item_code', $validated['item_code'])
-                    ->where('supplier_code', $validated['supplier_code'])
-                    ->where(function ($query) {
-                        $query->where('bill_printed', 'N')->orWhereNull('bill_printed');
-                    })
-                    ->where('price_per_kg', 0)
-                    ->where('Processed', 'N')
-                    ->orderBy('created_at', 'desc')
-                    ->first();
-
-                if ($existingSale) {
-                    $newWeight = $existingSale->weight + $incomingNetWeight;
-                    $newPacks = $existingSale->packs + $numPacks;
-
-                    $newTotal = $newWeight * 0;
-
-                    // --- KULIYA CALCULATION FOR UPDATE (USE CUSTOM OR CALCULATE) ---
-                    $updatedKuliya = $request->filled('kuliya')
-                        ? (float) $validated['kuliya']
-                        : $this->calculateKuliya($validated['item_code'], $validated['item_name'], $newWeight);
-
-                    $history = $existingSale->breakdown_history;
-                    if (is_string($history)) {
-                        $history = json_decode($history, true);
-                    }
-                    if (!is_array($history)) {
-                        $history = [
-                            [
-                                'time' => $existingSale->created_at->format('h:i A'),
-                                'weight' => (float) $existingSale->weight,
-                                'packs' => (int) $existingSale->packs
-                            ]
-                        ];
-                    }
-
-                    $history[] = $currentEntry;
-
-                    $existingSale->update([
-                        'weight' => $newWeight,
-                        'SupplierWeight' => $newWeight,
-                        'packs' => $newPacks,
-                        'total' => $newTotal,
-                        'SupplierTotal' => 0,
-                        'profit' => 0,
-                        'breakdown_history' => $history,
-                        'bag_real_weight' => $bagWeightPerUnit,
-                        'Kuliya' => $updatedKuliya,
-                        'updated_at' => now(),
-                    ]);
-
-                    DB::commit();
-                    return response()->json([
-                        'success' => true,
-                        'message' => 'Existing record updated',
-                        'data' => $existingSale->fresh()
-                    ]);
-                }
-            }
+            // Every entry is saved as its own record. Entries with the same customer, item and
+            // supplier at price 0 used to be added onto one record; they now stay separate so
+            // the customer and supplier bills list each one.
 
             // ---------- COMMISSION & PROFIT ----------
             $commissionAmount = 0.00;
