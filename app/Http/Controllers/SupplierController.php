@@ -337,9 +337,11 @@ public function generateFSeriesBill(): JsonResponse
     $validated = $request->validate([
         'transaction_ids' => 'required|array',
         'telephone_no'   => 'nullable|string',
-        'advance_amount' => 'required|numeric',
+        'advance_amount' => 'required|numeric|min:0',
+        'hire_amount'    => 'nullable|numeric|min:0',
         'supplier_code'  => 'required|string'
     ]);
+    $validated['hire_amount'] = (float) ($validated['hire_amount'] ?? 0);
 
     \Log::info('Validation passed', ['validated' => $validated]);
 
@@ -392,10 +394,15 @@ public function generateFSeriesBill(): JsonResponse
             'bill_no'       => $finalBillNo,
             'sales_data'    => $salesRecords->toJson(),
             'advance_amount'=> $validated['advance_amount'],
+            'hire_amount'   => $validated['hire_amount'],
             'supplier_code' => $validated['supplier_code'],
             'created_at'    => now(),
         ]);
         \Log::info('Public link created', ['token' => $token]);
+
+        // The advance and hire are deducted on this bill only: take them off the supplier
+        // so the next bill does not deduct them again (a cancelled print gives them back).
+        $this->useUpSupplierCharges($validated['supplier_code'], (float) $validated['advance_amount'], $validated['hire_amount']);
 
         DB::commit();
         \Log::info('Transaction committed');
@@ -495,6 +502,15 @@ public function cancelPrint(Request $request)
 
         DB::table('supplier_bill_links')->where('token', $request->print_token)->delete();
 
+        // The bill did not print: the supplier's advance and hire are still owed
+        $v = $pending['validated'];
+        $supplier = Supplier::where('code', $v['supplier_code'])->lockForUpdate()->first();
+        if ($supplier) {
+            $supplier->advance_amount = (float) $supplier->advance_amount + (float) ($v['advance_amount'] ?? 0);
+            $supplier->hire_amount = (float) ($supplier->hire_amount ?? 0) + (float) ($v['hire_amount'] ?? 0);
+            $supplier->save();
+        }
+
         $counter = SupplierBillNumber::where('id', 1)->lockForUpdate()->first();
         if ($counter && (int) $counter->last_number === (int) $pending['bill_number']) {
             $counter->decrement('last_number');
@@ -510,7 +526,8 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
 {
     // 1. Calculate totals for the message
     $total = $records->sum('SupplierTotal');
-    $net = $total - $data['advance_amount'];
+    $hire = (float) ($data['hire_amount'] ?? 0);
+    $net = $total - $data['advance_amount'] - $hire;
     
     // 2. Build the Public View URL
     $baseUrl = rtrim(env('APP_FRONTEND_URL'), '/');
@@ -528,6 +545,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                "{$summary}\n" .
                "Total: Rs. " . number_format($total, 2) . "\n" .
                "Advance: Rs. " . number_format($data['advance_amount'], 2) . "\n" .  // Explicitly showing advance
+               ($hire > 0 ? "Hire: Rs. " . number_format($hire, 2) . "\n" : "") .
                "Net Payable: Rs. " . number_format($net, 2) . "\n" .
                "View Bill: {$url}";
 
@@ -729,6 +747,11 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
         'data' => $sale
     ], 200);
 }
+/**
+ * Supplier Bills page, "Update Advance": sets the supplier's advance (0 clears it).
+ * It is deducted on the supplier's next printed bill, then cleared. The date is saved so
+ * the day-end process also clears an advance that was never used.
+ */
 public function store2(Request $request)
     {
         $validated = $request->validate([
@@ -736,16 +759,78 @@ public function store2(Request $request)
             'advance_amount' => 'required|numeric|min:0',
         ]);
 
-        // Logic: Find by 'code', update or create with the 'advance_amount'
-        $supplier = Supplier::updateOrCreate(
-            ['code' => $validated['code']],
-            ['advance_amount' => $validated['advance_amount']]
-        );
+        $supplier = Supplier::where('code', $validated['code'])->first();
+        if (!$supplier) {
+            return response()->json(['message' => "Supplier {$validated['code']} not found."], 404);
+        }
+
+        $supplier->advance_amount = round((float) $validated['advance_amount'], 2);
+        $supplier->advance_created_date = $this->workingDate();
+        $supplier->save();
 
         return response()->json([
             'message' => 'Supplier data saved successfully!',
             'data' => $supplier
         ], 200);
+    }
+
+/**
+ * Supplier Bills page, "Update Hire": sets the hire (transport) amount to deduct on the
+ * supplier's next printed bill (0 clears it). Cleared once that bill is printed.
+ */
+public function updateHire(Request $request)
+    {
+        $validated = $request->validate([
+            'code' => 'required|string',
+            'hire_amount' => 'required|numeric|min:0',
+        ]);
+
+        $supplier = Supplier::where('code', $validated['code'])->first();
+        if (!$supplier) {
+            return response()->json(['message' => "Supplier {$validated['code']} not found."], 404);
+        }
+
+        $supplier->hire_amount = round((float) $validated['hire_amount'], 2);
+        $supplier->save();
+
+        return response()->json(['message' => 'Hire amount saved.', 'data' => $supplier], 200);
+    }
+
+/** Advance and hire a printed supplier bill was printed with (for reprints). */
+public function billCharges($billNo)
+    {
+        $link = DB::table('supplier_bill_links')->where('bill_no', $billNo)->orderByDesc('id')->first();
+
+        return response()->json([
+            'bill_no' => $billNo,
+            'found' => (bool) $link,
+            'advance_amount' => $link ? (float) ($link->advance_amount ?? 0) : 0,
+            'hire_amount' => $link ? (float) ($link->hire_amount ?? 0) : 0,
+        ]);
+    }
+
+/** Take the amounts deducted on a bill off the supplier (never below 0). */
+private function useUpSupplierCharges(string $supplierCode, float $advance, float $hire): void
+    {
+        if ($advance <= 0 && $hire <= 0) {
+            return;
+        }
+        $supplier = Supplier::where('code', $supplierCode)->lockForUpdate()->first();
+        if (!$supplier) {
+            return;
+        }
+        $supplier->advance_amount = max(0, round((float) $supplier->advance_amount - $advance, 2));
+        $supplier->hire_amount = max(0, round((float) ($supplier->hire_amount ?? 0) - $hire, 2));
+        if ((float) $supplier->advance_amount <= 0) {
+            $supplier->advance_created_date = null;
+        }
+        $supplier->save();
+    }
+
+/** Date saved with an advance; the day-end process clears advances up to its date. */
+private function workingDate(): string
+    {
+        return now()->toDateString();
     }
     public function getByCode($code) {
     return Supplier::where('code', $code)->firstOrFail();
@@ -802,9 +887,11 @@ public function resendSupplierSMS(Request $request)
         'telephone_no' => 'required|string',
         'supplier_code' => 'required|string',
         'transaction_ids' => 'required|array',
-        'advance_amount' => 'required|numeric',
+        'advance_amount' => 'required|numeric|min:0',
+        'hire_amount' => 'nullable|numeric|min:0',
         'is_reprint' => 'boolean'
     ]);
+    $validated['hire_amount'] = (float) ($validated['hire_amount'] ?? 0);
 
     try {
         // Fetch the CURRENT sales records for this bill with updated data
@@ -832,6 +919,7 @@ public function resendSupplierSMS(Request $request)
                 ->update([
                     'sales_data' => $salesRecords->toJson(),
                     'advance_amount' => $validated['advance_amount'],
+                    'hire_amount' => $validated['hire_amount'],
                     'supplier_code' => $validated['supplier_code'],
                     'updated_at' => now(),
                 ]);
@@ -888,6 +976,7 @@ private function createNewBillLink($data, $records)
         'bill_no' => $data['bill_no'],
         'sales_data' => $records->toJson(),
         'advance_amount' => $data['advance_amount'],
+        'hire_amount' => (float) ($data['hire_amount'] ?? 0),
         'supplier_code' => $data['supplier_code'],
         'created_at' => now(),
         'updated_at' => now(),
@@ -900,7 +989,8 @@ private function sendReprintSMS($data, $records, $token)
 {
     // Calculate totals with current data
     $total = $records->sum('SupplierTotal');
-    $net = $total - $data['advance_amount'];
+    $hire = (float) ($data['hire_amount'] ?? 0);
+    $net = $total - $data['advance_amount'] - $hire;
     
     // Build the Public View URL
     $baseUrl = rtrim(env('APP_FRONTEND_URL'), '/');
@@ -920,6 +1010,7 @@ private function sendReprintSMS($data, $records, $token)
                    "{$summary}\n" .
                    "Total: Rs. " . number_format($total, 2) . "\n" .
                    "Advance: Rs. " . number_format($data['advance_amount'], 2) . "\n" .
+                   ($hire > 0 ? "Hire: Rs. " . number_format($hire, 2) . "\n" : "") .
                    "Net: Rs. " . number_format($net, 2) . "\n" .
                    "View Updated Bill: {$url}\n" .
                    "Please check the updated details.";
@@ -929,6 +1020,7 @@ private function sendReprintSMS($data, $records, $token)
                    "{$summary}\n" .
                    "Total: Rs. " . number_format($total, 2) . "\n" .
                    "Advance: Rs. " . number_format($data['advance_amount'], 2) . "\n" .
+                   ($hire > 0 ? "Hire: Rs. " . number_format($hire, 2) . "\n" : "") .
                    "Net: Rs. " . number_format($net, 2) . "\n" .
                    "View Bill: {$url}";
     }

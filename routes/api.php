@@ -220,6 +220,8 @@ Route::get('/sales-report/printed', [ReportController::class, 'getPrintedReport'
 Route::put('/sales/{id}/update-supplier', [SupplierController::class, 'updateSupplier']);
 //tore 2 metod
 Route::post('/suppliers/advance', [SupplierController::class, 'store2']);
+Route::post('/suppliers/hire', [SupplierController::class, 'updateHire']);
+Route::get('/suppliers/bill/{billNo}/charges', [SupplierController::class, 'billCharges']);
 Route::get('/suppliers/search-by-code/{code}', [SupplierController::class, 'getByCode']);
 //NEW SALES REPORT
 Route::get('/reports/sales-summary', [ReportController::class, 'getSalesSummary']);
