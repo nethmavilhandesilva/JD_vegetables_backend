@@ -759,10 +759,7 @@ public function store2(Request $request)
             'advance_amount' => 'required|numeric|min:0',
         ]);
 
-        $supplier = Supplier::where('code', $validated['code'])->first();
-        if (!$supplier) {
-            return response()->json(['message' => "Supplier {$validated['code']} not found."], 404);
-        }
+        $supplier = $this->findOrCreateSupplier($validated['code']);
 
         $supplier->advance_amount = round((float) $validated['advance_amount'], 2);
         $supplier->advance_created_date = $this->workingDate();
@@ -785,10 +782,7 @@ public function updateHire(Request $request)
             'hire_amount' => 'required|numeric|min:0',
         ]);
 
-        $supplier = Supplier::where('code', $validated['code'])->first();
-        if (!$supplier) {
-            return response()->json(['message' => "Supplier {$validated['code']} not found."], 404);
-        }
+        $supplier = $this->findOrCreateSupplier($validated['code']);
 
         $supplier->hire_amount = round((float) $validated['hire_amount'], 2);
         $supplier->save();
@@ -807,6 +801,49 @@ public function billCharges($billNo)
             'advance_amount' => $link ? (float) ($link->advance_amount ?? 0) : 0,
             'hire_amount' => $link ? (float) ($link->hire_amount ?? 0) : 0,
         ]);
+    }
+
+/**
+ * The supplier with this code; when the code is not in the suppliers table yet (sales can
+ * use codes that were never registered), a supplier record is added for it, named by the
+ * code. Required columns of the suppliers table get a blank value (text '', number 0,
+ * date today), so this works whatever extra columns the table has.
+ */
+private function findOrCreateSupplier(string $code): Supplier
+    {
+        $code = strtoupper(trim($code));
+        $supplier = Supplier::where('code', $code)->first();
+        if ($supplier) {
+            return $supplier;
+        }
+
+        $attributes = ['code' => $code, 'name' => $code, 'advance_amount' => 0];
+        try {
+            foreach (\Illuminate\Support\Facades\Schema::getColumns('suppliers') as $column) {
+                $name = $column['name'];
+                if (array_key_exists($name, $attributes) || $column['nullable'] || $column['default'] !== null
+                    || !empty($column['auto_increment']) || in_array($name, ['id', 'created_at', 'updated_at'], true)) {
+                    continue;
+                }
+                $type = strtolower($column['type_name'] ?? '');
+                if (str_contains($type, 'int') || in_array($type, ['decimal', 'double', 'float', 'numeric', 'real'], true)) {
+                    $attributes[$name] = 0;
+                } elseif ($type === 'date') {
+                    $attributes[$name] = now()->toDateString();
+                } elseif (str_contains($type, 'time')) {
+                    $attributes[$name] = now();
+                } else {
+                    $attributes[$name] = '';
+                }
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('Could not read suppliers columns: ' . $e->getMessage());
+        }
+
+        $supplier = new Supplier();
+        $supplier->forceFill($attributes)->save();
+
+        return $supplier;
     }
 
 /** Take the amounts deducted on a bill off the supplier (never below 0). */
