@@ -178,6 +178,8 @@ class NewSupplierBillController extends Controller
             'items.*.price_per_kg' => 'required|numeric|min:0',
             'items.*.pack_weights'   => 'nullable|array|max:1000',
             'items.*.pack_weights.*' => 'numeric|gt:0',
+            'items.*.pack_prices'    => 'nullable|array|max:1000',
+            'items.*.pack_prices.*'  => 'numeric|min:0',
         ]);
 
         $lines = [];
@@ -192,18 +194,37 @@ class NewSupplierBillController extends Controller
             $price = round((float) $line['price_per_kg'], 2);
             $packs = round((float) ($line['packs'] ?? 0), 2);
 
-            // Entered pack by pack: the line is the sum of the pack weights, packs = how many
-            $packWeights = array_values(array_map(fn ($w) => round((float) $w, 3), $line['pack_weights'] ?? []));
-            if ($packWeights) {
-                $weight = round(array_sum($packWeights), 3);
-                $packs = count($packWeights);
-            }
-            $amount = round($weight * $price, 2);
             $itemCode = strtoupper(trim($line['item_code']));
 
-            // Commission per kg from the commission rules (same as Sales Entry); deducted from the supplier
-            $commissionPerKg = $this->commissionPerKg($itemCode, $supplierCode, $price);
-            $lineCommission = round($weight * $commissionPerKg, 2);
+            // Entered pack by pack: the line is the sum of the pack weights, packs = how many.
+            // Each pack has its own price, so value and commission are added up pack by pack.
+            $packWeights = array_values(array_map(fn ($w) => round((float) $w, 3), $line['pack_weights'] ?? []));
+            $packPrices = [];
+            if ($packWeights) {
+                $sentPrices = array_values($line['pack_prices'] ?? []);
+                foreach ($packWeights as $j => $w) {
+                    $packPrices[] = round((float) ($sentPrices[$j] ?? $price), 2);
+                }
+                $weight = round(array_sum($packWeights), 3);
+                $packs = count($packWeights);
+
+                $amount = 0.0;
+                $lineCommission = 0.0;
+                foreach ($packWeights as $j => $w) {
+                    $amount += $w * $packPrices[$j];
+                    $lineCommission += $w * $this->commissionPerKg($itemCode, $supplierCode, $packPrices[$j]);
+                }
+                $amount = round($amount, 2);
+                $lineCommission = round($lineCommission, 2);
+                // Price per kg of the line: the average when the packs have different prices
+                $price = count(array_unique($packPrices)) === 1 ? $packPrices[0] : ($weight > 0 ? round($amount / $weight, 2) : $price);
+                $commissionPerKg = $weight > 0 ? round($lineCommission / $weight, 2) : 0.0;
+            } else {
+                $amount = round($weight * $price, 2);
+                // Commission per kg from the commission rules (same as Sales Entry); deducted from the supplier
+                $commissionPerKg = $this->commissionPerKg($itemCode, $supplierCode, $price);
+                $lineCommission = round($weight * $commissionPerKg, 2);
+            }
 
             $lines[] = $this->onlyExistingColumns('new_supplier_bill_items', [
                 'item_code'         => $itemCode,
@@ -213,6 +234,7 @@ class NewSupplierBillController extends Controller
                 'price_per_kg'      => $price,
                 'amount'            => $amount,
                 'pack_weights'      => $packWeights ?: null,
+                'pack_prices'       => $packPrices ?: null,
                 'commission_per_kg' => $commissionPerKg,
                 'commission_amount' => $lineCommission,
             ]);
