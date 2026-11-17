@@ -29,6 +29,11 @@ class NewSupplierBillController extends Controller
             'status'        => ['nullable', Rule::in(['unpaid', 'partial', 'paid'])],
             'search'        => 'nullable|string|max:100',
             'print_status'  => ['nullable', Rule::in(['held', 'printed'])],
+            // Printed sidebar: bills printed during the user's local day (sent as a UTC time range),
+            // whatever their bill date, so a held bill from an earlier day shows once printed.
+            'printed_from'  => 'nullable|date',
+            'printed_to'    => 'nullable|date|after:printed_from',
+            'printed_on'    => 'nullable|date_format:Y-m-d',
         ]);
 
         $query = NewSupplierBill::query();
@@ -47,6 +52,18 @@ class NewSupplierBillController extends Controller
         }
         if (! empty($data['print_status'])) {
             $query->where('is_printed', $data['print_status'] === 'printed');
+        }
+        if (! empty($data['printed_from']) && ! empty($data['printed_to'])) {
+            $from = \Carbon\Carbon::parse($data['printed_from'])->utc();
+            $to = \Carbon\Carbon::parse($data['printed_to'])->utc();
+            $printedOn = $data['printed_on'] ?? null;
+            $query->where(function ($q) use ($from, $to, $printedOn) {
+                $q->where('printed_at', '>=', $from)->where('printed_at', '<', $to);
+                // Older printed bills without a print time fall back to their bill date
+                if ($printedOn) {
+                    $q->orWhere(fn ($q2) => $q2->whereNull('printed_at')->whereDate('bill_date', $printedOn));
+                }
+            });
         }
         if (! empty($data['search'])) {
             $term = '%' . $data['search'] . '%';

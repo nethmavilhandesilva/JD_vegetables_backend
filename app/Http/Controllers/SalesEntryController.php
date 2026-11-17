@@ -203,6 +203,8 @@ class SalesEntryController extends Controller
             'bill_no' => 'nullable|string|max:255',
             'bill_printed' => 'nullable|string|in:N,Y',
             'kuliya' => 'nullable|numeric',  // ← ADD THIS LINE
+            // Credit (Y) or Cash (N) bill, chosen with the Credit / Cash buttons on Sales Entry
+            'credit_transaction' => 'nullable|string|in:Y,N',
         ]);
 
         try {
@@ -286,6 +288,7 @@ class SalesEntryController extends Controller
                 'commission_amount' => $commissionAmount,
                 'bag_real_weight' => $bagWeightPerUnit,
                 'Kuliya' => $kuliya,
+                'credit_transaction' => $validated['credit_transaction'] ?? null,
             ]);
 
             DB::commit();
@@ -347,6 +350,11 @@ class SalesEntryController extends Controller
         // cancel-print (put the bill back to unprinted). Without it: old behaviour.
         $deferSms = $request->boolean('defer_sms');
 
+        // Credit (Y) / Cash (N) chosen on Sales Entry: the whole bill gets it when printed
+        $creditFlag = in_array($request->input('credit_transaction'), ['Y', 'N'], true)
+            ? $request->input('credit_transaction')
+            : null;
+
         try {
 
             // 1. ✅ HANDLE BILL NUMBER GENERATION
@@ -362,7 +370,7 @@ class SalesEntryController extends Controller
             $previousState = [];
 
             // 2. ✅ UPDATE SALES RECORDS IN TRANSACTION
-            DB::transaction(function () use ($salesIds, $billNoToUse, &$salesRecords, &$previousState) {
+            DB::transaction(function () use ($salesIds, $billNoToUse, $creditFlag, &$salesRecords, &$previousState) {
 
                 $salesRecords = Sale::whereIn('id', $salesIds)->get();
 
@@ -378,6 +386,7 @@ class SalesEntryController extends Controller
                         'FirstTimeBillPrintedOn' => $sale->FirstTimeBillPrintedOn,
                         // The column is "BillReprintAfterchanges" (lower-case c)
                         'BillReprintAfterChanges' => $sale->getAttribute('BillReprintAfterchanges') ?? $sale->getAttribute('BillReprintAfterChanges'),
+                        'credit_transaction' => $sale->credit_transaction,
                     ];
 
                     if ($sale->bill_printed === 'Y') {
@@ -388,6 +397,9 @@ class SalesEntryController extends Controller
                     $sale->processed = 'Y';
                     $sale->bill_no = $billNoToUse;
                     $sale->FirstTimeBillPrintedOn = $sale->FirstTimeBillPrintedOn ?? now();
+                    if ($creditFlag) {
+                        $sale->credit_transaction = $creditFlag;
+                    }
                     $sale->save();
                 }
             });
@@ -524,6 +536,9 @@ class SalesEntryController extends Controller
                 $sale->bill_no = $prev['bill_no'];
                 $sale->FirstTimeBillPrintedOn = $prev['FirstTimeBillPrintedOn'];
                 $sale->BillReprintAfterChanges = $prev['BillReprintAfterChanges'];
+                if (array_key_exists('credit_transaction', $prev)) {
+                    $sale->credit_transaction = $prev['credit_transaction'];
+                }
                 $sale->save();
             }
 

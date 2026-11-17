@@ -6,103 +6,215 @@ use App\Models\Sale;
 use App\Models\Worker;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 /**
  * Accounts (bottom navigation bar):
- *  - customers / suppliers: read from the sales table (the open day's records)
+ *  - customers / suppliers: read from the sales table (today) and sales_histories (earlier days)
  *  - workers: simple data entry, stored in the workers table
  */
 class AccountsController extends Controller
 {
-    /** Customer line total, same as the customer bill: weight x price + bags x bag price + kuliya. */
-    private const CUSTOMER_LINE_TOTAL = 'COALESCE(s.weight,0) * COALESCE(s.price_per_kg,0) + COALESCE(s.packs,0) * COALESCE(s.CustomerPackCost,0) + COALESCE(s.Kuliya,0)';
+    /** Today's records (sales) and earlier days (sales_histories): both are read. */
+    private const TABLES = ['sales' => 'today', 'sales_histories' => 'history'];
 
-    /** Every customer code in the sales table with the customer's full name and totals. */
+    /** Column expression, or a fallback when an older table does not have that column. */
+    private function col(string $table, string $column, string $fallback = '0'): string
+    {
+        static $columns = [];
+        if (!isset($columns[$table])) {
+            $columns[$table] = Schema::hasTable($table)
+                ? array_map('strtolower', Schema::getColumnListing($table))
+                : [];
+        }
+        return in_array(strtolower($column), $columns[$table], true) ? "s.`{$column}`" : $fallback;
+    }
+
+    private function tableExists(string $table): bool
+    {
+        return Schema::hasTable($table);
+    }
+
+    /** Customer line total, same as the customer bill: weight x price + bags x bag price + kuliya. */
+    private function customerLineTotal(string $table): string
+    {
+        return 'COALESCE(s.weight,0) * COALESCE(s.price_per_kg,0) + COALESCE(s.packs,0) * COALESCE('
+            . $this->col($table, 'CustomerPackCost') . ',0) + COALESCE(' . $this->col($table, 'Kuliya') . ',0)';
+    }
+
+    /** Every customer code in sales and sales history, with the full name and totals of both. */
     public function customers()
     {
-        $rows = DB::table('sales as s')
-            ->leftJoin('customers as c', DB::raw('UPPER(c.short_name)'), '=', DB::raw('UPPER(s.customer_code)'))
-            ->whereNotNull('s.customer_code')
-            ->where('s.customer_code', '<>', '')
-            ->selectRaw('UPPER(s.customer_code) AS customer_code')
-            ->selectRaw('MAX(c.name) AS full_name')
-            ->selectRaw('MAX(s.customer_name) AS sales_name')
-            ->selectRaw('COUNT(*) AS records')
-            ->selectRaw("COUNT(DISTINCT CASE WHEN s.bill_no IS NOT NULL AND s.bill_no <> '' THEN s.bill_no END) AS bills")
-            ->selectRaw("SUM(CASE WHEN s.bill_printed = 'Y' THEN 0 ELSE 1 END) AS unprinted_records")
-            ->selectRaw('SUM(' . self::CUSTOMER_LINE_TOTAL . ') AS total')
-            ->groupBy(DB::raw('UPPER(s.customer_code)'))
-            ->orderBy('customer_code')
-            ->get()
-            ->map(fn ($r) => [
-                'customer_code' => $r->customer_code,
-                // Full name from the customers table; the name typed on the sale otherwise
-                'full_name' => $r->full_name ?: ($r->sales_name && strtoupper($r->sales_name) !== $r->customer_code ? $r->sales_name : null),
-                'records' => (int) $r->records,
-                'bills' => (int) $r->bills,
-                'unprinted_records' => (int) $r->unprinted_records,
-                'total' => round((float) $r->total, 2),
-            ]);
+        $merged = [];
+        foreach (self::TABLES as $table => $source) {
+            if (!$this->tableExists($table)) {
+                continue;
+            }
+            $rows = DB::table("{$table} as s")
+                ->whereNotNull('s.customer_code')
+                ->where('s.customer_code', '<>', '')
+                ->selectRaw('UPPER(TRIM(s.customer_code)) AS customer_code')
+                ->selectRaw('MAX(' . $this->col($table, 'customer_name', 'NULL') . ') AS sales_name')
+                ->selectRaw('COUNT(*) AS records')
+                // Bill numbers can repeat on different days, so count date + bill no
+                ->selectRaw("COUNT(DISTINCT CASE WHEN s.bill_no IS NOT NULL AND s.bill_no <> '' THEN CONCAT(COALESCE(" . $this->col($table, 'Date', "''") . ",''), '|', s.bill_no) END) AS bills")
+                ->selectRaw("SUM(CASE WHEN s.bill_printed = 'Y' THEN 0 ELSE 1 END) AS unprinted_records")
+                ->selectRaw('SUM(' . $this->customerLineTotal($table) . ') AS total')
+                ->selectRaw('MAX(' . $this->col($table, 'Date', 'NULL') . ') AS last_date')
+                ->groupBy(DB::raw('UPPER(TRIM(s.customer_code))'))
+                ->get();
+
+            foreach ($rows as $r) {
+                $m = $merged[$r->customer_code] ?? [
+                    'customer_code' => $r->customer_code, 'sales_name' => null, 'records' => 0, 'bills' => 0,
+                    'unprinted_records' => 0, 'total' => 0.0, 'last_date' => null, 'in_today' => false,
+                ];
+                $m['sales_name'] = $m['sales_name'] ?: $r->sales_name;
+                $m['records'] += (int) $r->records;
+                $m['bills'] += (int) $r->bills;
+                // Only today's records can still be waiting to print
+                if ($source === 'today') {
+                    $m['unprinted_records'] += (int) $r->unprinted_records;
+                    $m['in_today'] = true;
+                }
+                $m['total'] += (float) $r->total;
+                if ($r->last_date && (!$m['last_date'] || $r->last_date > $m['last_date'])) {
+                    $m['last_date'] = $r->last_date;
+                }
+                $merged[$r->customer_code] = $m;
+            }
+        }
+
+        $names = DB::table('customers')->get(['short_name', 'name'])
+            ->mapWithKeys(fn ($c) => [strtoupper(trim((string) $c->short_name)) => $c->name]);
+
+        $rows = collect($merged)->sortKeys()->values()->map(fn ($m) => [
+            'customer_code' => $m['customer_code'],
+            // Full name from the customers table; the name typed on the sale otherwise
+            'full_name' => $names[$m['customer_code']] ?? (
+                $m['sales_name'] && strtoupper($m['sales_name']) !== $m['customer_code'] ? $m['sales_name'] : null
+            ),
+            'records' => $m['records'],
+            'bills' => $m['bills'],
+            'unprinted_records' => $m['unprinted_records'],
+            'total' => round($m['total'], 2),
+            'last_date' => $m['last_date'],
+            'in_today' => $m['in_today'],
+        ]);
 
         return response()->json(['customers' => $rows]);
     }
 
-    /** All sales lines of one customer, for the bill details view (grouped into bills on screen). */
+    /** All sales lines of one customer from sales and sales history (grouped into bills on screen). */
     public function customerBills(string $code)
     {
-        $records = Sale::query()
-            ->whereRaw('UPPER(customer_code) = ?', [strtoupper($code)])
-            ->orderBy('bill_no')
-            ->orderBy('id')
-            ->get([
-                'id', 'customer_code', 'customer_name', 'supplier_code', 'item_code', 'item_name', 'weight',
-                'price_per_kg', 'packs', 'CustomerPackCost', 'Kuliya', 'total', 'bill_no', 'bill_printed',
-                'credit_transaction', 'given_amount', 'Date', 'created_at',
-            ]);
+        $records = collect();
+        foreach (self::TABLES as $table => $source) {
+            if (!$this->tableExists($table)) {
+                continue;
+            }
+            $rows = DB::table("{$table} as s")
+                ->whereRaw('UPPER(TRIM(s.customer_code)) = ?', [strtoupper(trim($code))])
+                ->selectRaw("s.id, s.customer_code, s.supplier_code, s.item_code, s.item_name, s.weight, s.price_per_kg, s.packs, s.total, s.bill_no, s.bill_printed")
+                ->selectRaw($this->col($table, 'customer_name', 'NULL') . ' AS customer_name')
+                ->selectRaw($this->col($table, 'CustomerPackCost') . ' AS CustomerPackCost')
+                ->selectRaw($this->col($table, 'Kuliya') . ' AS Kuliya')
+                ->selectRaw($this->col($table, 'credit_transaction', 'NULL') . ' AS credit_transaction')
+                ->selectRaw($this->col($table, 'given_amount', 'NULL') . ' AS given_amount')
+                ->selectRaw($this->col($table, 'Date', 'NULL') . ' AS Date')
+                ->selectRaw($this->col($table, 'created_at', 'NULL') . ' AS created_at')
+                ->selectRaw('? AS source', [$source])
+                ->orderBy('s.id')
+                ->get();
+            $records = $records->concat($rows);
+        }
 
         $customer = DB::table('customers')->whereRaw('UPPER(short_name) = ?', [strtoupper($code)])
             ->first(['short_name', 'name', 'telephone_no', 'address']);
 
-        return response()->json(['customer' => $customer, 'records' => $records]);
+        return response()->json(['customer' => $customer, 'records' => $records->values()]);
     }
 
-    /** Every supplier code in the sales table with the supplier's name and totals. */
+    /** Every supplier code in sales and sales history, with the supplier's name and totals of both. */
     public function suppliers()
     {
-        $rows = DB::table('sales as s')
-            ->leftJoin('suppliers as p', DB::raw('UPPER(p.code)'), '=', DB::raw('UPPER(s.supplier_code)'))
-            ->whereNotNull('s.supplier_code')
-            ->where('s.supplier_code', '<>', '')
-            ->selectRaw('UPPER(s.supplier_code) AS supplier_code')
-            ->selectRaw('MAX(p.name) AS full_name')
-            ->selectRaw('COUNT(*) AS records')
-            ->selectRaw("COUNT(DISTINCT CASE WHEN s.supplier_bill_no IS NOT NULL AND s.supplier_bill_no <> '' THEN s.supplier_bill_no END) AS bills")
-            ->selectRaw('SUM(COALESCE(s.SupplierTotal,0)) AS total')
-            ->groupBy(DB::raw('UPPER(s.supplier_code)'))
-            ->orderBy('supplier_code')
-            ->get()
-            ->map(fn ($r) => [
-                'supplier_code' => $r->supplier_code,
-                'full_name' => $r->full_name && strtoupper($r->full_name) !== $r->supplier_code ? $r->full_name : null,
-                'records' => (int) $r->records,
-                'bills' => (int) $r->bills,
-                'total' => round((float) $r->total, 2),
-            ]);
+        $merged = [];
+        foreach (self::TABLES as $table => $source) {
+            if (!$this->tableExists($table)) {
+                continue;
+            }
+            $billNo = $this->col($table, 'supplier_bill_no', 'NULL');
+            $rows = DB::table("{$table} as s")
+                ->whereNotNull('s.supplier_code')
+                ->where('s.supplier_code', '<>', '')
+                ->selectRaw('UPPER(TRIM(s.supplier_code)) AS supplier_code')
+                ->selectRaw('COUNT(*) AS records')
+                ->selectRaw("COUNT(DISTINCT CASE WHEN {$billNo} IS NOT NULL AND {$billNo} <> '' THEN {$billNo} END) AS bills")
+                ->selectRaw('SUM(COALESCE(' . $this->col($table, 'SupplierTotal') . ',0)) AS total')
+                ->selectRaw('MAX(' . $this->col($table, 'Date', 'NULL') . ') AS last_date')
+                ->groupBy(DB::raw('UPPER(TRIM(s.supplier_code))'))
+                ->get();
+
+            foreach ($rows as $r) {
+                $m = $merged[$r->supplier_code] ?? [
+                    'supplier_code' => $r->supplier_code, 'records' => 0, 'bills' => 0, 'total' => 0.0, 'last_date' => null, 'in_today' => false,
+                ];
+                $m['records'] += (int) $r->records;
+                $m['bills'] += (int) $r->bills;
+                $m['total'] += (float) $r->total;
+                if ($source === 'today') {
+                    $m['in_today'] = true;
+                }
+                if ($r->last_date && (!$m['last_date'] || $r->last_date > $m['last_date'])) {
+                    $m['last_date'] = $r->last_date;
+                }
+                $merged[$r->supplier_code] = $m;
+            }
+        }
+
+        $names = DB::table('suppliers')->get(['code', 'name'])
+            ->mapWithKeys(fn ($p) => [strtoupper(trim((string) $p->code)) => $p->name]);
+
+        $rows = collect($merged)->sortKeys()->values()->map(function ($m) use ($names) {
+            $name = $names[$m['supplier_code']] ?? null;
+            return [
+                'supplier_code' => $m['supplier_code'],
+                'full_name' => $name && strtoupper($name) !== $m['supplier_code'] ? $name : null,
+                'records' => $m['records'],
+                'bills' => $m['bills'],
+                'total' => round($m['total'], 2),
+                'last_date' => $m['last_date'],
+                'in_today' => $m['in_today'],
+            ];
+        });
 
         return response()->json(['suppliers' => $rows]);
     }
 
-    /** One supplier's bills: each supplier bill number with its total (not-yet-printed lines as one group). */
+    /** One supplier's bills from sales and sales history: each supplier bill number with its total. */
     public function supplierBills(string $code)
     {
-        $records = Sale::query()
-            ->whereRaw('UPPER(supplier_code) = ?', [strtoupper($code)])
-            ->orderBy('id')
-            ->get([
-                'id', 'supplier_code', 'customer_code', 'item_code', 'item_name', 'weight', 'SupplierWeight',
-                'SupplierPricePerKg', 'SupplierTotal', 'packs', 'supplier_bill_no', 'supplier_bill_printed', 'Date', 'created_at',
-            ]);
+        $records = collect();
+        foreach (self::TABLES as $table => $source) {
+            if (!$this->tableExists($table)) {
+                continue;
+            }
+            $rows = DB::table("{$table} as s")
+                ->whereRaw('UPPER(TRIM(s.supplier_code)) = ?', [strtoupper(trim($code))])
+                ->selectRaw('s.id, s.supplier_code, s.customer_code, s.item_code, s.item_name, s.weight, s.packs')
+                ->selectRaw($this->col($table, 'SupplierWeight', 'NULL') . ' AS SupplierWeight')
+                ->selectRaw($this->col($table, 'SupplierPricePerKg') . ' AS SupplierPricePerKg')
+                ->selectRaw($this->col($table, 'SupplierTotal') . ' AS SupplierTotal')
+                ->selectRaw($this->col($table, 'supplier_bill_no', 'NULL') . ' AS supplier_bill_no')
+                ->selectRaw($this->col($table, 'supplier_bill_printed', 'NULL') . ' AS supplier_bill_printed')
+                ->selectRaw($this->col($table, 'Date', 'NULL') . ' AS Date')
+                ->selectRaw($this->col($table, 'created_at', 'NULL') . ' AS created_at')
+                ->selectRaw('? AS source', [$source])
+                ->orderBy('s.id')
+                ->get();
+            $records = $records->concat($rows);
+        }
 
         $bills = $records->groupBy(fn ($r) => $r->supplier_bill_no ?: '')
             ->map(function ($lines, $billNo) {
@@ -112,7 +224,8 @@ class AccountsController extends Controller
                     'records' => $lines->count(),
                     'packs' => (int) $lines->sum('packs'),
                     'weight' => round((float) $lines->sum(fn ($l) => (float) ($l->SupplierWeight ?? $l->weight)), 3),
-                    'total' => round((float) $lines->sum('SupplierTotal'), 2),
+                    'total' => round((float) $lines->sum(fn ($l) => (float) $l->SupplierTotal), 2),
+                    'date' => $lines->max('Date'),
                     'lines' => $lines->values(),
                 ];
             })

@@ -25,6 +25,7 @@ class SalesHistory extends Model
         'total',
         'packs',
         'bill_printed', // <-- ADD THIS
+        'credit_transaction', // Y = credit bill, N = cash bill (copied from sales at day end)
         'Processed', 
         'bill_no',
         'updated'   ,
