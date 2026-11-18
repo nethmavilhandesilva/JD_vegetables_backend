@@ -1759,12 +1759,17 @@ public function grnReport2(Request $request)
         $dateColumn = 'Date';
     }
 
-    $query = $model->select([
-        'supplier_code', 'customer_code', 'item_code', 'item_name',
+    // id, weight, packs and Kuliya are also sent so the report can print each bill in the
+    // supplier bill format; only columns the table really has are selected
+    $existing = array_flip(\Illuminate\Support\Facades\Schema::getColumnListing($model->getModel()->getTable()));
+    $columns = array_values(array_filter([
+        'id', 'supplier_code', 'customer_code', 'item_code', 'item_name',
+        'weight', 'packs', 'Kuliya',
         'SupplierWeight', 'SupplierPricePerKg', 'SupplierTotal',
         'SupplierPackCost', 'SupplierPackLabour', 'profit',
         'supplier_bill_printed', 'supplier_bill_no', 'CustomerPackCost', 'Date'
-    ]);
+    ], fn ($col) => isset($existing[$col])));
+    $query = $model->select($columns);
 
     // Apply date filter
     // DATE() so it works whether `Date` is a DATE, DATETIME or text column (a text '2026-11-18'
