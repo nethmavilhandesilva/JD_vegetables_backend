@@ -1188,15 +1188,26 @@ private function calculateKuliya($packs): float
 
         if ($totalRecordsToMove === 0) {
             // New Supplier Bills are moved to history even on a day with no sales
+            $nsbError = null;
             try {
+                $this->ensureNewSupplierBillHistoryTables();
                 $nsbMoved = $this->moveNewSupplierBillsToHistory();
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 Log::error('Day end: moving new supplier bills failed: ' . $e->getMessage());
                 $nsbMoved = 0;
+                $nsbError = $e->getMessage();
+            }
+            if ($nsbMoved > 0 && $nsbError === null) {
+                \App\Models\Setting::updateOrCreate(['key' => 'last_day_started_date'], ['value' => $processLogDate]);
+                return response()->json([
+                    'success' => true,
+                    'message' => "No sales today. {$nsbMoved} new supplier bill(s) moved to history.",
+                    'new_supplier_bills_moved' => $nsbMoved,
+                ]);
             }
             return response()->json([
                 'success' => false,
-                'message' => "Sales table is empty." . ($nsbMoved > 0 ? " {$nsbMoved} new supplier bill(s) moved to history." : ''),
+                'message' => "Sales table is empty." . ($nsbError ? " New supplier bills not moved: {$nsbError}" : ''),
                 'new_supplier_bills_moved' => $nsbMoved,
             ], 404);
         }
@@ -1283,6 +1294,16 @@ private function calculateKuliya($packs): float
             'totals' => $totals,
         ];
 
+        // History tables for New Supplier Bills: created here if the deploy's migrate did not
+        // (table creation must happen before the transaction starts)
+        $nsbError = null;
+        try {
+            $this->ensureNewSupplierBillHistoryTables();
+        } catch (\Throwable $e) {
+            Log::error('Day end: could not create new supplier bill history tables: ' . $e->getMessage());
+            $nsbError = $e->getMessage();
+        }
+
         \DB::beginTransaction();
 
         try {
@@ -1324,6 +1345,7 @@ private function calculateKuliya($packs): float
             } catch (\Throwable $e) {
                 Log::error('Day end: moving new supplier bills failed: ' . $e->getMessage());
                 $nsbMoved = 0;
+                $nsbError = $e->getMessage();
             }
 
             // ✅ SAVE SELECTED DATE TO SETTINGS
@@ -1343,7 +1365,8 @@ private function calculateKuliya($packs): float
 
             return response()->json([
                 'success' => true,
-                'message' => "Process complete. Reports emailed.",
+                'message' => "Process complete. Reports emailed. {$nsbMoved} new supplier bill(s) moved to history."
+                    . ($nsbError ? " New supplier bills NOT moved: {$nsbError}" : ''),
                 'new_supplier_bills_moved' => $nsbMoved,
                 'adjustment_date_used' => $adjustmentDate,
                 'saved_date' => $processLogDate
@@ -1360,12 +1383,21 @@ private function calculateKuliya($packs): float
         }
     }
     /**
-     * Day end: moves the PRINTED bills of the New Supplier Bills dashboard (and their item
-     * lines) from new_supplier_bills / new_supplier_bill_items into history_new_supplier_bills /
-     * history_new_supplier_bill_items, then deletes them from the live tables. Held (unprinted)
-     * bills stay so they can still be printed. Only columns that exist in both tables are
+     * Day end: moves ALL bills of the New Supplier Bills dashboard (printed and held, with their
+     * item lines) from new_supplier_bills / new_supplier_bill_items into history_new_supplier_bills /
+     * history_new_supplier_bill_items, then deletes them from the live tables. Only columns that exist in both tables are
      * copied. Returns the number of bills moved (0 when the history tables do not exist yet).
      */
+    /** Creates the New Supplier Bills history tables if they do not exist (same as the migration). */
+    private function ensureNewSupplierBillHistoryTables(): void
+    {
+        if (Schema::hasTable('history_new_supplier_bills') && Schema::hasTable('history_new_supplier_bill_items')) {
+            return;
+        }
+        $migration = require database_path('migrations/2026_11_18_000100_create_history_new_supplier_bills_tables.php');
+        $migration->up();
+    }
+
     private function moveNewSupplierBillsToHistory(): int
     {
         $bills = 'new_supplier_bills';
@@ -1374,8 +1406,7 @@ private function calculateKuliya($packs): float
         $hItems = 'history_new_supplier_bill_items';
 
         if (!Schema::hasTable($bills) || !Schema::hasTable($hBills) || !Schema::hasTable($hItems)) {
-            Log::warning('Day end: new supplier bills not moved - history_new_supplier_bills / history_new_supplier_bill_items table missing (run the migration or database/sql/2026_11_18_history_new_supplier_bills.sql).');
-            return 0;
+            throw new \RuntimeException('history_new_supplier_bills / history_new_supplier_bill_items table is missing');
         }
 
         $billCols = array_values(array_intersect(Schema::getColumnListing($bills), Schema::getColumnListing($hBills)));
@@ -1385,11 +1416,8 @@ private function calculateKuliya($packs): float
             ? array_values(array_diff(array_intersect(Schema::getColumnListing($items), Schema::getColumnListing($hItems)), ['id']))
             : [];
 
-        $query = DB::table($bills);
-        if (Schema::hasColumn($bills, 'is_printed')) {
-            $query->where('is_printed', 1);
-        }
-        $ids = $query->pluck('id');
+        // Every bill moves: printed and held
+        $ids = DB::table($bills)->pluck('id');
         if ($ids->isEmpty()) {
             return 0;
         }
