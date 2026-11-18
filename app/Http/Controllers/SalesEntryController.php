@@ -1287,14 +1287,20 @@ private function calculateKuliya($packs): float
 
         try {
 
-            // Move Sales → SalesHistory
+            // Move Sales → SalesHistory. Only columns that also exist in sales_histories are
+            // copied, so a column missing there (e.g. a migration not run yet) cannot stop the day end.
             $historyData = [];
-            $allowedColumns = (new \App\Models\Sale())->getFillable();
+            $historyColumns = array_flip(Schema::getColumnListing('sales_histories'));
+            $allowedColumns = array_values(array_filter(
+                (new \App\Models\Sale())->getFillable(),
+                fn ($col) => isset($historyColumns[$col]) && $col !== 'id'
+            ));
 
             foreach ($allSales as $sale) {
                 $data = $sale->only($allowedColumns);
-                unset($data['id']);
-                $data['bag_real_weight'] = $sale->bag_real_weight ?? 0;
+                if (isset($historyColumns['bag_real_weight'])) {
+                    $data['bag_real_weight'] = $sale->bag_real_weight ?? 0;
+                }
 
                 foreach ($data as $key => $value) {
                     if (is_array($value)) {
@@ -1305,11 +1311,20 @@ private function calculateKuliya($packs): float
                 $historyData[] = $data;
             }
 
-            \App\Models\SalesHistory::insert($historyData);
+            // Insert in chunks: one huge insert can pass MySQL's placeholder limit on a busy day
+            foreach (array_chunk($historyData, 300) as $chunk) {
+                \App\Models\SalesHistory::insert($chunk);
+            }
             \App\Models\Sale::query()->delete();
 
-            // Move printed New Supplier Bills → history_new_supplier_bills
-            $nsbMoved = $this->moveNewSupplierBillsToHistory();
+            // Move printed New Supplier Bills → history_new_supplier_bills. A problem here is
+            // logged and does not stop the day end (those bills just stay for the next day end).
+            try {
+                $nsbMoved = $this->moveNewSupplierBillsToHistory();
+            } catch (\Throwable $e) {
+                Log::error('Day end: moving new supplier bills failed: ' . $e->getMessage());
+                $nsbMoved = 0;
+            }
 
             // ✅ SAVE SELECTED DATE TO SETTINGS
             \App\Models\Setting::updateOrCreate(
@@ -1334,8 +1349,9 @@ private function calculateKuliya($packs): float
                 'saved_date' => $processLogDate
             ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             \DB::rollBack();
+            Log::error('Day end failed: ' . $e->getMessage(), ['line' => $e->getFile() . ':' . $e->getLine()]);
 
             return response()->json([
                 'success' => false,
