@@ -1745,8 +1745,10 @@ public function grnReport2(Request $request)
     }
   public function getSupplierReport(Request $request)
 {
-    $startDate = $request->query('start_date');
-    $endDate   = $request->query('end_date');
+    // A date range reads sales_histories only; no dates reads today's sales.
+    // One date alone means that single day.
+    $startDate = $request->query('start_date') ?: $request->query('end_date');
+    $endDate   = $request->query('end_date') ?: $startDate;
 
     // Decide table
     if ($startDate && $endDate) {
@@ -1765,10 +1767,12 @@ public function grnReport2(Request $request)
     ]);
 
     // Apply date filter
+    // DATE() so it works whether `Date` is a DATE, DATETIME or text column (a text '2026-11-18'
+    // compared with '2026-11-18 00:00:00' would drop the first day)
     if ($startDate && $endDate) {
-        $query->whereBetween($dateColumn, [
-            Carbon::parse($startDate)->startOfDay(),
-            Carbon::parse($endDate)->endOfDay(),
+        $query->whereRaw("DATE(`{$dateColumn}`) BETWEEN ? AND ?", [
+            Carbon::parse($startDate)->toDateString(),
+            Carbon::parse($endDate)->toDateString(),
         ]);
     }
 
