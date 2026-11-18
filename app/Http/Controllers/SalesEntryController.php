@@ -1374,6 +1374,7 @@ private function calculateKuliya($packs): float
         $hItems = 'history_new_supplier_bill_items';
 
         if (!Schema::hasTable($bills) || !Schema::hasTable($hBills) || !Schema::hasTable($hItems)) {
+            Log::warning('Day end: new supplier bills not moved - history_new_supplier_bills / history_new_supplier_bill_items table missing (run the migration or database/sql/2026_11_18_history_new_supplier_bills.sql).');
             return 0;
         }
 
