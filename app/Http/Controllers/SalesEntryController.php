@@ -10,6 +10,7 @@ use App\Models\Item;
 use App\Models\Customer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Log; // Make sure Log is imported
 use App\Models\Salesadjustment;
 use App\Models\SalesHistory;
@@ -1186,9 +1187,17 @@ private function calculateKuliya($packs): float
         $totalRecordsToMove = $allSales->count();
 
         if ($totalRecordsToMove === 0) {
+            // New Supplier Bills are moved to history even on a day with no sales
+            try {
+                $nsbMoved = $this->moveNewSupplierBillsToHistory();
+            } catch (\Exception $e) {
+                Log::error('Day end: moving new supplier bills failed: ' . $e->getMessage());
+                $nsbMoved = 0;
+            }
             return response()->json([
                 'success' => false,
-                'message' => "Sales table is empty."
+                'message' => "Sales table is empty." . ($nsbMoved > 0 ? " {$nsbMoved} new supplier bill(s) moved to history." : ''),
+                'new_supplier_bills_moved' => $nsbMoved,
             ], 404);
         }
 
@@ -1299,6 +1308,9 @@ private function calculateKuliya($packs): float
             \App\Models\SalesHistory::insert($historyData);
             \App\Models\Sale::query()->delete();
 
+            // Move printed New Supplier Bills → history_new_supplier_bills
+            $nsbMoved = $this->moveNewSupplierBillsToHistory();
+
             // ✅ SAVE SELECTED DATE TO SETTINGS
             \App\Models\Setting::updateOrCreate(
                 ['key' => 'last_day_started_date'],
@@ -1317,6 +1329,7 @@ private function calculateKuliya($packs): float
             return response()->json([
                 'success' => true,
                 'message' => "Process complete. Reports emailed.",
+                'new_supplier_bills_moved' => $nsbMoved,
                 'adjustment_date_used' => $adjustmentDate,
                 'saved_date' => $processLogDate
             ]);
@@ -1330,6 +1343,84 @@ private function calculateKuliya($packs): float
             ], 500);
         }
     }
+    /**
+     * Day end: moves the PRINTED bills of the New Supplier Bills dashboard (and their item
+     * lines) from new_supplier_bills / new_supplier_bill_items into history_new_supplier_bills /
+     * history_new_supplier_bill_items, then deletes them from the live tables. Held (unprinted)
+     * bills stay so they can still be printed. Only columns that exist in both tables are
+     * copied. Returns the number of bills moved (0 when the history tables do not exist yet).
+     */
+    private function moveNewSupplierBillsToHistory(): int
+    {
+        $bills = 'new_supplier_bills';
+        $items = 'new_supplier_bill_items';
+        $hBills = 'history_new_supplier_bills';
+        $hItems = 'history_new_supplier_bill_items';
+
+        if (!Schema::hasTable($bills) || !Schema::hasTable($hBills) || !Schema::hasTable($hItems)) {
+            return 0;
+        }
+
+        $billCols = array_values(array_intersect(Schema::getColumnListing($bills), Schema::getColumnListing($hBills)));
+        $billCols = array_values(array_diff($billCols, ['id']));
+        $hasItems = Schema::hasTable($items);
+        $itemCols = $hasItems
+            ? array_values(array_diff(array_intersect(Schema::getColumnListing($items), Schema::getColumnListing($hItems)), ['id']))
+            : [];
+
+        $query = DB::table($bills);
+        if (Schema::hasColumn($bills, 'is_printed')) {
+            $query->where('is_printed', 1);
+        }
+        $ids = $query->pluck('id');
+        if ($ids->isEmpty()) {
+            return 0;
+        }
+
+        $moved = 0;
+        DB::transaction(function () use ($ids, $bills, $items, $hBills, $hItems, $billCols, $itemCols, $hasItems, &$moved) {
+            $now = now();
+            foreach ($ids->chunk(200) as $chunk) {
+                $rows = DB::table($bills)->whereIn('id', $chunk)->get();
+                $lines = $hasItems
+                    ? DB::table($items)->whereIn('new_supplier_bill_id', $chunk)->orderBy('id')->get()->groupBy('new_supplier_bill_id')
+                    : collect();
+
+                foreach ($rows as $row) {
+                    // A bill already in history (e.g. an earlier day end stopped half way) is not copied twice
+                    $historyId = DB::table($hBills)->where('original_id', $row->id)->value('id');
+                    if (!$historyId) {
+                        $data = ['original_id' => $row->id, 'moved_at' => $now];
+                        foreach ($billCols as $col) {
+                            $data[$col] = $row->{$col};
+                        }
+                        $historyId = DB::table($hBills)->insertGetId($data);
+
+                        $itemRows = [];
+                        foreach ($lines->get($row->id, collect()) as $line) {
+                            $item = ['original_id' => $line->id, 'history_new_supplier_bill_id' => $historyId];
+                            foreach ($itemCols as $col) {
+                                $item[$col] = $line->{$col};
+                            }
+                            $itemRows[] = $item;
+                        }
+                        if ($itemRows) {
+                            DB::table($hItems)->insert($itemRows);
+                        }
+                    }
+                    $moved++;
+                }
+
+                if ($hasItems) {
+                    DB::table($items)->whereIn('new_supplier_bill_id', $chunk)->delete();
+                }
+                DB::table($bills)->whereIn('id', $chunk)->delete();
+            }
+        });
+
+        return $moved;
+    }
+
     public function viewPublicBill($token)
     {
         $bill = DB::table('bill_links')->where('token', $token)->first();

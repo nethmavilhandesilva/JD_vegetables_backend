@@ -146,6 +146,7 @@ class NewSupplierBillController extends Controller
     public function store(Request $request)
     {
         $data = $this->validated($request);
+        $this->keepIdsAfterHistory();
 
         $bill = DB::transaction(function () use ($data, $request) {
             $bill = NewSupplierBill::create($this->headerAttributes($data) + $this->printAttributes($data, false) + [
@@ -338,6 +339,28 @@ class NewSupplierBillController extends Controller
     }
 
     /** Drop fields whose column is not in the table yet (before the SQL file is imported). */
+    /**
+     * The day-end process moves printed bills to history_new_supplier_bills and deletes them
+     * here. Some MySQL/MariaDB servers restart the auto id at MAX(id)+1 after a restart, which
+     * would reuse ids (and SB- bill numbers) already in history. Before the first new bill
+     * after a day end, the next id is moved past the highest id in history.
+     */
+    private function keepIdsAfterHistory(): void
+    {
+        try {
+            if (! Schema::hasTable('history_new_supplier_bills')) {
+                return;
+            }
+            $maxHistory = (int) DB::table('history_new_supplier_bills')->max('original_id');
+            $maxLive = (int) DB::table('new_supplier_bills')->max('id');
+            if ($maxHistory > $maxLive) {
+                DB::statement('ALTER TABLE new_supplier_bills AUTO_INCREMENT = ' . ($maxHistory + 1));
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('New supplier bills: could not set next id after history: ' . $e->getMessage());
+        }
+    }
+
     private function onlyExistingColumns(string $table, array $fields): array
     {
         static $columns = [];
