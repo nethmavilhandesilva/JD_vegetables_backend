@@ -29,6 +29,7 @@ class NewSupplierBillController extends Controller
             'status'        => ['nullable', Rule::in(['unpaid', 'partial', 'paid'])],
             'search'        => 'nullable|string|max:100',
             'print_status'  => ['nullable', Rule::in(['held', 'printed'])],
+            'payment_type'  => ['nullable', Rule::in(['credit', 'cash'])],
             // Printed sidebar: bills printed during the user's local day (sent as a UTC time range),
             // whatever their bill date, so a held bill from an earlier day shows once printed.
             'printed_from'  => 'nullable|date',
@@ -52,6 +53,10 @@ class NewSupplierBillController extends Controller
         }
         if (! empty($data['print_status'])) {
             $query->where('is_printed', $data['print_status'] === 'printed');
+        }
+        $hasPaymentType = Schema::hasColumn('new_supplier_bills', 'payment_type');
+        if (! empty($data['payment_type']) && $hasPaymentType) {
+            $query->where('payment_type', $data['payment_type']);
         }
         if (! empty($data['printed_from']) && ! empty($data['printed_to'])) {
             $from = \Carbon\Carbon::parse($data['printed_from'])->utc();
@@ -86,6 +91,21 @@ class NewSupplierBillController extends Controller
             COALESCE(SUM(balance_amount), 0) AS balance_amount
         ')->first();
 
+        // Credit and cash bills shown separately (before the column exists every bill is credit)
+        $byPayment = $hasPaymentType
+            ? (clone $query)->selectRaw("payment_type, COUNT(*) AS bill_count, COALESCE(SUM(net_amount), 0) AS net_amount, COALESCE(SUM(balance_amount), 0) AS balance_amount")
+                ->groupBy('payment_type')->get()->keyBy('payment_type')
+            : collect();
+        $paymentSummary = [];
+        foreach (['credit', 'cash'] as $type) {
+            $row = $byPayment[$type] ?? null;
+            $paymentSummary[$type] = [
+                'bill_count'     => (int) ($row->bill_count ?? ($type === 'credit' && ! $hasPaymentType ? $summary->bill_count : 0)),
+                'net_amount'     => round((float) ($row->net_amount ?? ($type === 'credit' && ! $hasPaymentType ? $summary->net_amount : 0)), 2),
+                'balance_amount' => round((float) ($row->balance_amount ?? ($type === 'credit' && ! $hasPaymentType ? $summary->balance_amount : 0)), 2),
+            ];
+        }
+
         $bills = $query->withCount('items')
             ->orderByDesc('bill_date')
             ->orderByDesc('id')
@@ -103,6 +123,7 @@ class NewSupplierBillController extends Controller
                 'net_amount'     => round((float) $summary->net_amount, 2),
                 'paid_amount'    => round((float) $summary->paid_amount, 2),
                 'balance_amount' => round((float) $summary->balance_amount, 2),
+                'by_payment'     => $paymentSummary,
             ],
             'truncated' => (int) $summary->bill_count > self::MAX_ROWS,
         ]);
@@ -187,6 +208,7 @@ class NewSupplierBillController extends Controller
             'paid_amount'          => 'nullable|numeric|min:0',
             'notes'                => 'nullable|string|max:2000',
             'print'                => 'nullable|boolean',
+            'payment_type'         => ['nullable', Rule::in(['credit', 'cash'])],
             'items'                => 'required|array|min:1',
             'items.*.item_code'    => 'required|string|max:50',
             'items.*.item_name'    => 'nullable|string|max:255',
@@ -347,6 +369,9 @@ class NewSupplierBillController extends Controller
             'reference_no'   => $data['reference_no'] ?? null,
             'deduction_note' => $data['deduction_note'] ?? null,
             'notes'          => $data['notes'] ?? null,
-        ] + $data['totals'];
+        ] + $this->onlyExistingColumns('new_supplier_bills', [
+            // Credit / Cash buttons on the entry screen (Credit by default)
+            'payment_type'   => $data['payment_type'] ?? 'credit',
+        ]) + $data['totals'];
     }
 }
