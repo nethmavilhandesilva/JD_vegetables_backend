@@ -612,6 +612,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'SupplierPricePerKg',
                 'SupplierPackCost',
                 'CustomerPackCost',
+                'Kuliya', // printed on the supplier bill as "Bag Cost"
                 'supplier_bill_printed',
                 'supplier_bill_no',
                 'loan_taken',
@@ -658,6 +659,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'SupplierPackCost',
                 'supplier_bill_printed',
                 'CustomerPackCost',
+                'Kuliya',
                 'supplier_bill_no',
                 'loan_taken',
                 DB::raw('DATE(created_at) as Date')
@@ -703,6 +705,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'SupplierPricePerKg',
                 'CustomerPackCost',
                 'SupplierPackCost',
+                'Kuliya', // printed on the supplier bill as "Bag Cost"
                 'supplier_bill_printed',
                 'supplier_bill_no',
                 DB::raw('DATE(created_at) as Date')
