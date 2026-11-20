@@ -244,7 +244,7 @@ class SupplierController extends Controller
             'profile_pic',
             'nic_front',
             'nic_back',
-            DB::raw('DATE(created_at) as Date')
+            DB::raw('COALESCE(DATE(`Date`), DATE(created_at)) as Date') // the sale's working date (sales.Date)
         )
         ->where('supplier_code', $supplierCode)
         ->get();
@@ -616,7 +616,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'supplier_bill_printed',
                 'supplier_bill_no',
                 'loan_taken',
-                DB::raw('DATE(created_at) as Date')
+                DB::raw('COALESCE(DATE(`Date`), DATE(created_at)) as Date') // the sale's working date (sales.Date)
             )
             ->where('supplier_code', $supplierCode)
             ->where(function ($query) {
@@ -662,7 +662,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'Kuliya',
                 'supplier_bill_no',
                 'loan_taken',
-                DB::raw('DATE(created_at) as Date')
+                DB::raw('COALESCE(DATE(`Date`), DATE(created_at)) as Date') // the sale's working date (sales.Date)
             )
             ->where('supplier_code', $supplierCode)
             ->where('supplier_bill_printed', 'Y')
@@ -708,7 +708,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'Kuliya', // printed on the supplier bill as "Bag Cost"
                 'supplier_bill_printed',
                 'supplier_bill_no',
-                DB::raw('DATE(created_at) as Date')
+                DB::raw('COALESCE(DATE(`Date`), DATE(created_at)) as Date') // the sale's working date (sales.Date)
             )
             ->where('supplier_bill_no', $billNo)
             ->where('supplier_bill_printed', 'Y')

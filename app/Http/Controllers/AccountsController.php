@@ -238,6 +238,63 @@ class AccountsController extends Controller
         return response()->json(['supplier' => $supplier, 'bills' => $bills]);
     }
 
+    /**
+     * Edit supplier bill values (supplier weight / supplier price per kg) of records in today's
+     * sales or in sales history, then recalculate SupplierTotal, profit and commission.
+     * Body: { "updates": [ { "id": 1, "source": "today"|"history", "SupplierWeight": 12.5, "SupplierPricePerKg": 95 } ] }
+     */
+    public function updateSupplierLines(Request $request)
+    {
+        $data = $request->validate([
+            'updates'                      => 'required|array|min:1|max:500',
+            'updates.*.id'                 => 'required|integer',
+            'updates.*.source'             => ['required', Rule::in(['today', 'history', 'sales', 'sales_history', 'sales_histories'])],
+            'updates.*.SupplierWeight'     => 'nullable|numeric|min:0',
+            'updates.*.SupplierPricePerKg' => 'nullable|numeric|min:0',
+        ]);
+
+        try {
+            $count = DB::transaction(function () use ($data) {
+                $count = 0;
+                foreach ($data['updates'] as $i => $u) {
+                    if (!isset($u['SupplierWeight']) && !isset($u['SupplierPricePerKg'])) {
+                        continue;
+                    }
+                    $table = in_array($u['source'], ['today', 'sales'], true) ? 'sales' : 'sales_histories';
+                    $row = DB::table($table)->where('id', $u['id'])->lockForUpdate()->first();
+                    if (!$row) {
+                        throw new \RuntimeException("Record #{$u['id']} was not found.");
+                    }
+                    $columns = array_map('strtolower', Schema::getColumnListing($table));
+                    $has = fn ($c) => in_array(strtolower($c), $columns, true);
+
+                    $weight = isset($u['SupplierWeight']) ? (float) $u['SupplierWeight'] : (float) ($row->SupplierWeight ?? $row->weight ?? 0);
+                    $price = isset($u['SupplierPricePerKg']) ? (float) $u['SupplierPricePerKg'] : (float) ($row->SupplierPricePerKg ?? 0);
+                    $supplierTotal = round($weight * $price, 2);
+
+                    $fields = [];
+                    if ($has('SupplierWeight')) $fields['SupplierWeight'] = $weight;
+                    if ($has('SupplierPricePerKg')) $fields['SupplierPricePerKg'] = $price;
+                    if ($has('SupplierTotal')) $fields['SupplierTotal'] = $supplierTotal;
+                    if ($has('profit')) $fields['profit'] = round((float) ($row->total ?? 0) - $supplierTotal, 2);
+                    if ($has('commission_amount') && isset($row->price_per_kg)) {
+                        $fields['commission_amount'] = round((float) $row->price_per_kg - $price, 2);
+                    }
+                    if ($has('updated_at')) $fields['updated_at'] = now();
+
+                    DB::table($table)->where('id', $u['id'])->update($fields);
+                    $count++;
+                }
+                return $count;
+            });
+
+            return response()->json(['message' => "{$count} record(s) updated.", 'updated_count' => $count]);
+        } catch (\Throwable $e) {
+            \Log::error('updateSupplierLines failed', ['error' => $e->getMessage()]);
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
     // ---------------- Workers ----------------
 
     public function workers()

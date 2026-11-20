@@ -60,6 +60,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/accounts/customers/{code}', [AccountsController::class, 'customerBills']);
     Route::get('/accounts/suppliers', [AccountsController::class, 'suppliers']);
     Route::get('/accounts/suppliers/{code}', [AccountsController::class, 'supplierBills']);
+    Route::put('/accounts/supplier-lines', [AccountsController::class, 'updateSupplierLines']);
     Route::get('/accounts/workers', [AccountsController::class, 'workers']);
     Route::post('/accounts/workers', [AccountsController::class, 'storeWorker']);
     Route::put('/accounts/workers/{worker}', [AccountsController::class, 'updateWorker']);
