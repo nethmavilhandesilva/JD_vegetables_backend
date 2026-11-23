@@ -136,6 +136,49 @@ class AccountsController extends Controller
         return response()->json(['customer' => $customer, 'records' => $records->values()]);
     }
 
+    /**
+     * Advance / hire deducted on each printed supplier bill (saved in supplier_bill_links when
+     * the bill was printed; the latest row of a bill number counts): bill_no => [advance, hire, supplier_code].
+     */
+    private function billCharges(): array
+    {
+        if (!$this->tableExists('supplier_bill_links')) {
+            return [];
+        }
+        $cols = array_map('strtolower', Schema::getColumnListing('supplier_bill_links'));
+        $select = ['id', 'bill_no'];
+        foreach (['supplier_code', 'advance_amount', 'hire_amount'] as $c) {
+            if (in_array($c, $cols, true)) $select[] = $c;
+        }
+        $charges = [];
+        foreach (DB::table('supplier_bill_links')->orderBy('id')->get($select) as $l) {
+            if ($l->bill_no === null || $l->bill_no === '') continue;
+            $charges[(string) $l->bill_no] = [
+                'advance' => (float) ($l->advance_amount ?? 0),
+                'hire' => (float) ($l->hire_amount ?? 0),
+                'supplier_code' => strtoupper(trim((string) ($l->supplier_code ?? ''))),
+            ];
+        }
+        return $charges;
+    }
+
+    /** Advance / hire still on the supplier (not printed on a bill yet): CODE => [advance, hire]. */
+    private function pendingCharges(): array
+    {
+        $cols = array_map('strtolower', Schema::getColumnListing('suppliers'));
+        $select = ['code'];
+        foreach (['advance_amount', 'hire_amount'] as $c) {
+            if (in_array($c, $cols, true)) $select[] = $c;
+        }
+        $pending = [];
+        foreach (DB::table('suppliers')->get($select) as $p) {
+            $a = (float) ($p->advance_amount ?? 0);
+            $h = (float) ($p->hire_amount ?? 0);
+            if ($a || $h) $pending[strtoupper(trim((string) $p->code))] = ['advance' => $a, 'hire' => $h];
+        }
+        return $pending;
+    }
+
     /** Every supplier code in sales and sales history, with the supplier's name and totals of both. */
     public function suppliers()
     {
@@ -159,7 +202,9 @@ class AccountsController extends Controller
             foreach ($rows as $r) {
                 $m = $merged[$r->supplier_code] ?? [
                     'supplier_code' => $r->supplier_code, 'records' => 0, 'bills' => 0, 'total' => 0.0, 'last_date' => null, 'in_today' => false,
+                    'bill_nos' => [],
                 ];
+
                 $m['records'] += (int) $r->records;
                 $m['bills'] += (int) $r->bills;
                 $m['total'] += (float) $r->total;
@@ -171,14 +216,40 @@ class AccountsController extends Controller
                 }
                 $merged[$r->supplier_code] = $m;
             }
+
+            // Supplier bill numbers of each supplier (for the advance / hire deducted on them)
+            if ($billNo !== 'NULL') {
+                $pairs = DB::table("{$table} as s")
+                    ->whereNotNull('s.supplier_code')->where('s.supplier_code', '<>', '')
+                    ->whereNotNull('s.supplier_bill_no')->where('s.supplier_bill_no', '<>', '')
+                    ->selectRaw('DISTINCT UPPER(TRIM(s.supplier_code)) AS supplier_code, s.supplier_bill_no AS bill_no')
+                    ->get();
+                foreach ($pairs as $p) {
+                    if (isset($merged[$p->supplier_code])) {
+                        $merged[$p->supplier_code]['bill_nos'][(string) $p->bill_no] = true;
+                    }
+                }
+            }
         }
 
         $names = DB::table('suppliers')->get(['code', 'name'])
             ->mapWithKeys(fn ($p) => [strtoupper(trim((string) $p->code)) => $p->name]);
 
-        $rows = collect($merged)->sortKeys()->values()->map(function ($m) use ($names) {
+        $charges = $this->billCharges();
+        $pending = $this->pendingCharges();
+
+        $rows = collect($merged)->sortKeys()->values()->map(function ($m) use ($names, $charges, $pending) {
             $name = $names[$m['supplier_code']] ?? null;
+            $advance = $pending[$m['supplier_code']]['advance'] ?? 0.0;
+            $hire = $pending[$m['supplier_code']]['hire'] ?? 0.0;
+            foreach (array_keys($m['bill_nos']) as $bn) {
+                $advance += $charges[(string) $bn]['advance'] ?? 0;
+                $hire += $charges[(string) $bn]['hire'] ?? 0;
+            }
             return [
+                'advance' => round($advance, 2),
+                'hire' => round($hire, 2),
+                'net' => round($m['total'] - $advance - $hire, 2),
                 'supplier_code' => $m['supplier_code'],
                 'full_name' => $name && strtoupper($name) !== $m['supplier_code'] ? $name : null,
                 'records' => $m['records'],
@@ -216,9 +287,18 @@ class AccountsController extends Controller
             $records = $records->concat($rows);
         }
 
+        $charges = $this->billCharges();
+        $pending = $this->pendingCharges()[strtoupper(trim($code))] ?? ['advance' => 0.0, 'hire' => 0.0];
+
         $bills = $records->groupBy(fn ($r) => $r->supplier_bill_no ?: '')
-            ->map(function ($lines, $billNo) {
+            ->map(function ($lines, $billNo) use ($charges, $pending) {
+                // Printed bill: the advance / hire deducted on it; not printed yet: still on the supplier
+                $c = $billNo !== '' ? ($charges[(string) $billNo] ?? ['advance' => 0.0, 'hire' => 0.0]) : $pending;
+                $total = round((float) $lines->sum(fn ($l) => (float) $l->SupplierTotal), 2);
                 return [
+                    'advance' => round($c['advance'], 2),
+                    'hire' => round($c['hire'], 2),
+                    'net' => round($total - $c['advance'] - $c['hire'], 2),
                     'bill_no' => $billNo !== '' ? $billNo : null,
                     'printed' => $billNo !== '' && $lines->contains(fn ($l) => $l->supplier_bill_printed === 'Y'),
                     'records' => $lines->count(),

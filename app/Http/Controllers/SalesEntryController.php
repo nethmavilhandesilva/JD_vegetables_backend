@@ -38,6 +38,26 @@ class SalesEntryController extends Controller
      * Each sale is sent once (the old printed/unprinted copies and the unused customer
      * relation tripled the payload), and nothing is written to the log per request.
      */
+    /**
+     * Records of one earlier day from sales_histories (Sales Entry date filter, read only).
+     * GET /sales/history?date=YYYY-MM-DD
+     */
+    public function historyByDate(Request $request): JsonResponse
+    {
+        $data = $request->validate(['date' => 'required|date_format:Y-m-d']);
+        try {
+            $currentUser = auth()->user();
+            $query = \App\Models\SalesHistory::query()->whereRaw('DATE(`Date`) = ?', [$data['date']]);
+            if ($currentUser && $currentUser->role === 'User' && \Illuminate\Support\Facades\Schema::hasColumn('sales_histories', 'UniqueCode')) {
+                $query->where('UniqueCode', $currentUser->user_id);
+            }
+            return response()->json(['date' => $data['date'], 'sales' => $query->orderBy('id')->get()]);
+        } catch (\Throwable $e) {
+            Log::error('SalesEntryController@historyByDate FAILED', ['message' => $e->getMessage()]);
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
     public function index(Request $request): JsonResponse
     {
         try {
