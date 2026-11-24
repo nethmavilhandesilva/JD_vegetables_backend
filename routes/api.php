@@ -193,6 +193,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/sales/process-day', [SalesEntryController::class, 'processDay']);
 
     //loan section
+    Route::get('/customers-loans/detailed-report', [CustomersLoanController::class, 'detailedReport']);
     Route::get('/customers-loans/data', [CustomersLoanController::class, 'getInitialData']); // NEW: For Customers, GRN Codes
     Route::get('/customers-loans/index', [CustomersLoanController::class, 'index']); // Get today's loans
 

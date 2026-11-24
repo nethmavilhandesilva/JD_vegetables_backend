@@ -104,13 +104,82 @@ class CustomersLoanController extends Controller
         // Get the date from Setting model or use today as fallback
         $settingDate = Setting::value('value') ?? now()->toDateString();
 
-        // Fetch today's loans using the helper
-        $loans = $this->fetchTodayLoans($settingDate);
+        // ?date=YYYY-MM-DD shows the records of that day (Date column); default: the working day
+        $date = $settingDate;
+        if ($request->filled('date') && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $request->query('date'))) {
+            $date = $request->query('date');
+        }
+
+        $loans = $this->fetchTodayLoans($date);
 
         return response()->json([
             'grnCodes' => $grnCodes,
             'loans' => $loans,
-            'settingDate' => $settingDate
+            'settingDate' => $settingDate,
+            'date' => $date,
+        ]);
+    }
+
+    /**
+     * Detailed loan report from income_expenses (Date column).
+     * GET /customers-loans/detailed-report?start_date=&end_date=&code=&loan_type=
+     * code matches the customer short name or the supplier (farmer) code.
+     */
+    public function detailedReport(Request $request)
+    {
+        $data = $request->validate([
+            'start_date' => 'nullable|date_format:Y-m-d',
+            'end_date'   => 'nullable|date_format:Y-m-d',
+            'code'       => 'nullable|string|max:255',
+            'loan_type'  => 'nullable|string|max:50',
+        ]);
+        $start = $data['start_date'] ?? $data['end_date'] ?? null;
+        $end = $data['end_date'] ?? $start;
+
+        $query = IncomeExpenses::query();
+        if ($start) {
+            $query->whereRaw('DATE(`Date`) BETWEEN ? AND ?', [$start, $end]);
+        }
+        if (!empty($data['code'])) {
+            $code = strtoupper(trim($data['code']));
+            $query->where(function ($q) use ($code) {
+                $q->whereRaw('UPPER(TRIM(customer_short_name)) = ?', [$code])
+                  ->orWhereRaw('UPPER(TRIM(supplier_code)) = ?', [$code]);
+            });
+        }
+        if (!empty($data['loan_type'])) {
+            $query->where('loan_type', $data['loan_type']);
+        }
+
+        $rows = $query->orderBy('Date')->orderBy('created_at')->limit(5000)->get()->map(fn ($l) => [
+            'id' => $l->id,
+            'date' => $l->Date ? substr((string) $l->Date, 0, 10) : ($l->created_at ? $l->created_at->toDateString() : null),
+            'time' => $l->created_at ? $l->created_at->format('H:i') : null,
+            'loan_type' => $l->loan_type,
+            'code' => $l->customer_short_name ?: $l->supplier_code,
+            'customer_short_name' => $l->customer_short_name,
+            'supplier_code' => $l->supplier_code,
+            'description' => $l->description,
+            'bill_no' => $l->bill_no,
+            'settling_way' => $l->settling_way,
+            'cheque_no' => $l->cheque_no,
+            'bank' => $l->bank,
+            'cheque_date' => $l->cheque_date,
+            'amount' => (float) $l->amount,
+        ]);
+
+        $byType = $rows->groupBy('loan_type')->map(fn ($g, $type) => [
+            'loan_type' => $type,
+            'count' => $g->count(),
+            'total' => round($g->sum(fn ($r) => abs($r['amount'])), 2),
+        ])->values();
+
+        return response()->json([
+            'start_date' => $start,
+            'end_date' => $end,
+            'rows' => $rows->values(),
+            'by_type' => $byType,
+            'count' => $rows->count(),
         ]);
     }
 
