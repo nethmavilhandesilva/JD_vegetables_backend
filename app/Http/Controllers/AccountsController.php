@@ -89,7 +89,16 @@ class AccountsController extends Controller
         $names = DB::table('customers')->get(['short_name', 'name'])
             ->mapWithKeys(fn ($c) => [strtoupper(trim((string) $c->short_name)) => $c->name]);
 
+        $received = $this->tableExists('customer_bill_settlements')
+            ? DB::table('customer_bill_settlements')->selectRaw('UPPER(TRIM(customer_code)) AS code, SUM(amount) AS total')
+                ->groupBy(DB::raw('UPPER(TRIM(customer_code))'))->pluck('total', 'code')
+            : collect();
+
         $rows = collect($merged)->sortKeys()->values()->map(fn ($m) => [
+            // Money received against the bills (Settle); fully received = moved to the Received list
+            'received' => round((float) ($received[$m['customer_code']] ?? 0), 2),
+            'balance' => round($m['total'] - (float) ($received[$m['customer_code']] ?? 0), 2),
+            'fully_received' => $m['total'] > 0 && (float) ($received[$m['customer_code']] ?? 0) >= round($m['total'], 2) - 0.009,
             'customer_code' => $m['customer_code'],
             // Full name from the customers table; the name typed on the sale otherwise
             'full_name' => $names[$m['customer_code']] ?? (
@@ -133,7 +142,49 @@ class AccountsController extends Controller
         $customer = DB::table('customers')->whereRaw('UPPER(short_name) = ?', [strtoupper($code)])
             ->first(['short_name', 'name', 'telephone_no', 'address']);
 
-        return response()->json(['customer' => $customer, 'records' => $records->values()]);
+        $settlements = $this->tableExists('customer_bill_settlements')
+            ? DB::table('customer_bill_settlements')->whereRaw('UPPER(TRIM(customer_code)) = ?', [strtoupper(trim($code))])
+                ->orderBy('received_date')->orderBy('id')->get()
+            : collect();
+
+        return response()->json(['customer' => $customer, 'records' => $records->values(), 'settlements' => $settlements]);
+    }
+
+    /** Record money received against one bill of a customer. */
+    public function storeSettlement(Request $request, string $code)
+    {
+        if (!$this->tableExists('customer_bill_settlements')) {
+            return response()->json(['message' => 'Import database/sql/2026_11_25_customer_bill_settlements.sql first.'], 500);
+        }
+        $data = $request->validate([
+            'bill_key'      => 'required|string|max:120',
+            'bill_no'       => 'nullable|string|max:50',
+            'bill_date'     => 'nullable|date',
+            'amount'        => 'required|numeric|gt:0',
+            'received_date' => 'required|date',
+            'note'          => 'nullable|string|max:255',
+        ]);
+        $id = DB::table('customer_bill_settlements')->insertGetId([
+            'customer_code' => strtoupper(trim($code)),
+            'bill_key'      => $data['bill_key'],
+            'bill_no'       => $data['bill_no'] ?? null,
+            'bill_date'     => !empty($data['bill_date']) ? substr($data['bill_date'], 0, 10) : null,
+            'amount'        => round((float) $data['amount'], 2),
+            'received_date' => substr($data['received_date'], 0, 10),
+            'note'          => $data['note'] ?? null,
+            'created_at'    => now(),
+            'updated_at'    => now(),
+        ]);
+        return response()->json(DB::table('customer_bill_settlements')->find($id), 201);
+    }
+
+    /** Remove a settlement entered by mistake. */
+    public function destroySettlement(int $id)
+    {
+        if ($this->tableExists('customer_bill_settlements')) {
+            DB::table('customer_bill_settlements')->where('id', $id)->delete();
+        }
+        return response()->json(['deleted' => true]);
     }
 
     /**

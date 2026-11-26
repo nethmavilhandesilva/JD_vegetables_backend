@@ -58,6 +58,8 @@ Route::middleware('auth:sanctum')->group(function () {
     // ACCOUNTS (bottom bar): customers / suppliers from the sales table, workers data entry
     Route::get('/accounts/customers', [AccountsController::class, 'customers']);
     Route::get('/accounts/customers/{code}', [AccountsController::class, 'customerBills']);
+    Route::post('/accounts/customers/{code}/settlements', [AccountsController::class, 'storeSettlement']);
+    Route::delete('/accounts/customer-settlements/{id}', [AccountsController::class, 'destroySettlement']);
     Route::get('/accounts/suppliers', [AccountsController::class, 'suppliers']);
     Route::get('/accounts/suppliers/{code}', [AccountsController::class, 'supplierBills']);
     Route::put('/accounts/supplier-lines', [AccountsController::class, 'updateSupplierLines']);
