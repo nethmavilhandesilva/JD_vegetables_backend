@@ -166,7 +166,7 @@ class AccountsController extends Controller
             }
             $available = $credit[$code] ?? 0.0;
             $rows[] = [
-                'customer_code' => $code,
+                'customer_code' => (string) $code, // numeric codes (e.g. 113) become int array keys in PHP
                 'full_name' => $names[$code] ?? ($info[$code]['sales_name'] ?? null),
                 'in_today' => $info[$code]['in_today'] ?? false,
                 'unprinted_records' => $info[$code]['unprinted_records'] ?? 0,
@@ -425,7 +425,7 @@ class AccountsController extends Controller
                 'advance' => round($advance, 2),
                 'hire' => round($hire, 2),
                 'net' => round($m['total'] - $advance - $hire, 2),
-                'supplier_code' => $m['supplier_code'],
+                'supplier_code' => (string) $m['supplier_code'],
                 'full_name' => $name && strtoupper($name) !== $m['supplier_code'] ? $name : null,
                 'records' => $m['records'],
                 'bills' => $m['bills'],
