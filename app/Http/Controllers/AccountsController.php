@@ -43,74 +43,150 @@ class AccountsController extends Controller
             . $this->col($table, 'CustomerPackCost') . ',0) + COALESCE(' . $this->col($table, 'Kuliya') . ',0)';
     }
 
-    /** Every customer code in sales and sales history, with the full name and totals of both. */
+    /** Settlement rows (customer_bill_settlements), with the newer columns read safely. */
+    private function settlementRows(?string $code = null)
+    {
+        if (!$this->tableExists('customer_bill_settlements')) {
+            return collect();
+        }
+        $q = DB::table('customer_bill_settlements');
+        if ($code !== null) {
+            $q->whereRaw('UPPER(TRIM(customer_code)) = ?', [strtoupper(trim($code))]);
+        }
+        return $q->orderBy('received_date')->orderBy('id')->get()->map(function ($r) {
+            $r->customer_code = strtoupper(trim((string) $r->customer_code));
+            $r->amount = (float) $r->amount;
+            $r->closes_bill = (bool) ($r->closes_bill ?? false);
+            $r->from_credit = (bool) ($r->from_credit ?? false);
+            return $r;
+        });
+    }
+
+    /**
+     * Received money not given to a bill yet: received amounts (no bill) minus what was used
+     * from them to settle bills. CODE => amount.
+     */
+    private function availableCredit($settlements): array
+    {
+        $credit = [];
+        foreach ($settlements as $r) {
+            if ($r->bill_key === null || $r->bill_key === '') {
+                $credit[$r->customer_code] = ($credit[$r->customer_code] ?? 0) + $r->amount;
+            } elseif ($r->from_credit) {
+                $credit[$r->customer_code] = ($credit[$r->customer_code] ?? 0) - $r->amount;
+            }
+        }
+        return array_map(fn ($v) => round(max(0, $v), 2), $credit);
+    }
+
+    /**
+     * Customers by bill status. A bill (bill date + bill no) is settled when the money received
+     * for it covers its total, or when it was closed with a smaller amount ("fully settle").
+     * credit:   the customer's bills that are still open (unprinted bills are always open)
+     * received: the customer's settled bills
+     * A customer with both kinds of bills is in both lists.
+     */
     public function customers()
     {
-        $merged = [];
+        $bills = []; // CODE => [billKey => [...]]
+        $info = [];  // CODE => sales_name, in_today, unprinted_records
         foreach (self::TABLES as $table => $source) {
             if (!$this->tableExists($table)) {
                 continue;
             }
+            $date = $this->col($table, 'Date', 'NULL');
             $rows = DB::table("{$table} as s")
                 ->whereNotNull('s.customer_code')
                 ->where('s.customer_code', '<>', '')
                 ->selectRaw('UPPER(TRIM(s.customer_code)) AS customer_code')
+                ->selectRaw("{$date} AS bill_date, s.bill_no")
                 ->selectRaw('MAX(' . $this->col($table, 'customer_name', 'NULL') . ') AS sales_name')
-                ->selectRaw('COUNT(*) AS records')
-                // Bill numbers can repeat on different days, so count date + bill no
-                ->selectRaw("COUNT(DISTINCT CASE WHEN s.bill_no IS NOT NULL AND s.bill_no <> '' THEN CONCAT(COALESCE(" . $this->col($table, 'Date', "''") . ",''), '|', s.bill_no) END) AS bills")
                 ->selectRaw("SUM(CASE WHEN s.bill_printed = 'Y' THEN 0 ELSE 1 END) AS unprinted_records")
                 ->selectRaw('SUM(' . $this->customerLineTotal($table) . ') AS total')
-                ->selectRaw('MAX(' . $this->col($table, 'Date', 'NULL') . ') AS last_date')
-                ->groupBy(DB::raw('UPPER(TRIM(s.customer_code))'))
+                ->groupBy(DB::raw('UPPER(TRIM(s.customer_code))'), DB::raw($date), 's.bill_no')
                 ->get();
 
             foreach ($rows as $r) {
-                $m = $merged[$r->customer_code] ?? [
-                    'customer_code' => $r->customer_code, 'sales_name' => null, 'records' => 0, 'bills' => 0,
-                    'unprinted_records' => 0, 'total' => 0.0, 'last_date' => null, 'in_today' => false,
-                ];
-                $m['sales_name'] = $m['sales_name'] ?: $r->sales_name;
-                $m['records'] += (int) $r->records;
-                $m['bills'] += (int) $r->bills;
-                // Only today's records can still be waiting to print
+                $code = $r->customer_code;
+                $i = $info[$code] ?? ['sales_name' => null, 'in_today' => false, 'unprinted_records' => 0];
+                $i['sales_name'] = $i['sales_name'] ?: $r->sales_name;
                 if ($source === 'today') {
-                    $m['unprinted_records'] += (int) $r->unprinted_records;
-                    $m['in_today'] = true;
+                    $i['in_today'] = true;
+                    $i['unprinted_records'] += (int) $r->unprinted_records;
                 }
-                $m['total'] += (float) $r->total;
-                if ($r->last_date && (!$m['last_date'] || $r->last_date > $m['last_date'])) {
-                    $m['last_date'] = $r->last_date;
-                }
-                $merged[$r->customer_code] = $m;
+                $info[$code] = $i;
+
+                $day = $r->bill_date ? substr((string) $r->bill_date, 0, 10) : '';
+                $key = ($r->bill_no !== null && $r->bill_no !== '') ? $day . '|' . $r->bill_no : 'unprinted';
+                $bill = $bills[$code][$key] ?? ['key' => $key, 'date' => $day ?: null, 'total' => 0.0];
+                $bill['total'] += (float) $r->total;
+                $bills[$code][$key] = $bill;
             }
         }
+
+        $settlements = $this->settlementRows();
+        $paid = [];   // CODE|billKey => received
+        $closed = []; // CODE|billKey => true
+        $lastReceived = [];
+        foreach ($settlements as $r) {
+            if ($r->bill_key === null || $r->bill_key === '') continue;
+            $k = $r->customer_code . '|' . $r->bill_key;
+            $paid[$k] = ($paid[$k] ?? 0) + $r->amount;
+            if ($r->closes_bill) $closed[$k] = true;
+            $d = substr((string) $r->received_date, 0, 10);
+            if (!isset($lastReceived[$r->customer_code]) || $d > $lastReceived[$r->customer_code]) $lastReceived[$r->customer_code] = $d;
+        }
+        $credit = $this->availableCredit($settlements);
 
         $names = DB::table('customers')->get(['short_name', 'name'])
             ->mapWithKeys(fn ($c) => [strtoupper(trim((string) $c->short_name)) => $c->name]);
 
-        $received = $this->tableExists('customer_bill_settlements')
-            ? DB::table('customer_bill_settlements')->selectRaw('UPPER(TRIM(customer_code)) AS code, SUM(amount) AS total')
-                ->groupBy(DB::raw('UPPER(TRIM(customer_code))'))->pluck('total', 'code')
-            : collect();
-
-        $rows = collect($merged)->sortKeys()->values()->map(fn ($m) => [
-            // Money received against the bills (Settle); fully received = moved to the Received list
-            'received' => round((float) ($received[$m['customer_code']] ?? 0), 2),
-            'balance' => round($m['total'] - (float) ($received[$m['customer_code']] ?? 0), 2),
-            'fully_received' => $m['total'] > 0 && (float) ($received[$m['customer_code']] ?? 0) >= round($m['total'], 2) - 0.009,
-            'customer_code' => $m['customer_code'],
-            // Full name from the customers table; the name typed on the sale otherwise
-            'full_name' => $names[$m['customer_code']] ?? (
-                $m['sales_name'] && strtoupper($m['sales_name']) !== $m['customer_code'] ? $m['sales_name'] : null
-            ),
-            'records' => $m['records'],
-            'bills' => $m['bills'],
-            'unprinted_records' => $m['unprinted_records'],
-            'total' => round($m['total'], 2),
-            'last_date' => $m['last_date'],
-            'in_today' => $m['in_today'],
-        ]);
+        ksort($bills);
+        $rows = [];
+        foreach ($bills as $code => $list) {
+            $open = ['bills' => 0, 'total' => 0.0, 'balance' => 0.0, 'last_date' => null];
+            $done = ['bills' => 0, 'total' => 0.0, 'received' => 0.0, 'last_date' => null];
+            foreach ($list as $key => $b) {
+                $k = $code . '|' . $key;
+                $received = $paid[$k] ?? 0.0;
+                $settled = $key !== 'unprinted' && $b['total'] > 0
+                    && (!empty($closed[$k]) || $received >= round($b['total'], 2) - 0.009);
+                $grp = $settled ? 'done' : 'open';
+                if ($settled) {
+                    $done['bills']++;
+                    $done['total'] += $b['total'];
+                    $done['received'] += $received;
+                    if ($b['date'] && (!$done['last_date'] || $b['date'] > $done['last_date'])) $done['last_date'] = $b['date'];
+                } else {
+                    if ($key !== 'unprinted') $open['bills']++;
+                    $open['total'] += $b['total'];
+                    $open['balance'] += $b['total'] - $received;
+                    if ($b['date'] && (!$open['last_date'] || $b['date'] > $open['last_date'])) $open['last_date'] = $b['date'];
+                }
+            }
+            $available = $credit[$code] ?? 0.0;
+            $rows[] = [
+                'customer_code' => $code,
+                'full_name' => $names[$code] ?? ($info[$code]['sales_name'] ?? null),
+                'in_today' => $info[$code]['in_today'] ?? false,
+                'unprinted_records' => $info[$code]['unprinted_records'] ?? 0,
+                'available_credit' => $available,
+                // Open bills: balance still owed after the received amount not given to a bill yet
+                'credit' => ($open['bills'] > 0 || $open['total'] > 0.009) ? [
+                    'bills' => $open['bills'],
+                    'total' => round($open['total'], 2),
+                    'balance' => round($open['balance'] - $available, 2),
+                    'last_date' => $open['last_date'],
+                ] : null,
+                'received' => $done['bills'] > 0 ? [
+                    'bills' => $done['bills'],
+                    'total' => round($done['total'], 2),
+                    'received' => round($done['received'], 2),
+                    'last_date' => $done['last_date'],
+                    'last_received' => $lastReceived[$code] ?? null,
+                ] : null,
+            ];
+        }
 
         return response()->json(['customers' => $rows]);
     }
@@ -142,40 +218,88 @@ class AccountsController extends Controller
         $customer = DB::table('customers')->whereRaw('UPPER(short_name) = ?', [strtoupper($code)])
             ->first(['short_name', 'name', 'telephone_no', 'address']);
 
-        $settlements = $this->tableExists('customer_bill_settlements')
-            ? DB::table('customer_bill_settlements')->whereRaw('UPPER(TRIM(customer_code)) = ?', [strtoupper(trim($code))])
-                ->orderBy('received_date')->orderBy('id')->get()
-            : collect();
+        $settlements = $this->settlementRows($code);
 
-        return response()->json(['customer' => $customer, 'records' => $records->values(), 'settlements' => $settlements]);
+        return response()->json([
+            'customer' => $customer,
+            'records' => $records->values(),
+            'settlements' => $settlements->values(),
+            'available_credit' => $this->availableCredit($settlements)[strtoupper(trim($code))] ?? 0.0,
+        ]);
     }
 
-    /** Record money received against one bill of a customer. */
+    /**
+     * Record money received from a customer.
+     *  - bill_key empty: a received amount not given to a bill yet (used later when settling)
+     *  - bill_key set:   settle that bill with `amount` (cash now) + `credit_used` (from the
+     *                    customer's received amount); closes_bill = settled even if less than the total
+     */
     public function storeSettlement(Request $request, string $code)
     {
         if (!$this->tableExists('customer_bill_settlements')) {
             return response()->json(['message' => 'Import database/sql/2026_11_25_customer_bill_settlements.sql first.'], 500);
         }
         $data = $request->validate([
-            'bill_key'      => 'required|string|max:120',
+            'bill_key'      => 'nullable|string|max:120',
             'bill_no'       => 'nullable|string|max:50',
             'bill_date'     => 'nullable|date',
-            'amount'        => 'required|numeric|gt:0',
+            'amount'        => 'nullable|numeric|min:0',
+            'credit_used'   => 'nullable|numeric|min:0',
             'received_date' => 'required|date',
             'note'          => 'nullable|string|max:255',
+            'closes_bill'   => 'nullable|boolean',
         ]);
-        $id = DB::table('customer_bill_settlements')->insertGetId([
-            'customer_code' => strtoupper(trim($code)),
-            'bill_key'      => $data['bill_key'],
-            'bill_no'       => $data['bill_no'] ?? null,
-            'bill_date'     => !empty($data['bill_date']) ? substr($data['bill_date'], 0, 10) : null,
-            'amount'        => round((float) $data['amount'], 2),
+        $code = strtoupper(trim($code));
+        $amount = round((float) ($data['amount'] ?? 0), 2);
+        $creditUsed = round((float) ($data['credit_used'] ?? 0), 2);
+        $billKey = trim((string) ($data['bill_key'] ?? '')) ?: null;
+        $cols = array_map('strtolower', Schema::getColumnListing('customer_bill_settlements'));
+        $hasFlags = in_array('closes_bill', $cols, true) && in_array('from_credit', $cols, true);
+
+        if (!$billKey && $amount <= 0) {
+            return response()->json(['message' => 'Enter the amount received.'], 422);
+        }
+        if ($billKey && $amount + $creditUsed <= 0) {
+            return response()->json(['message' => 'Enter the amount received.'], 422);
+        }
+        if (($creditUsed > 0 || !empty($data['closes_bill']) || !$billKey) && !$hasFlags) {
+            return response()->json(['message' => 'Import database/sql/2026_11_26_customer_bill_settlements_flags.sql first.'], 500);
+        }
+        if ($creditUsed > 0) {
+            $available = $this->availableCredit($this->settlementRows($code))[$code] ?? 0.0;
+            if ($creditUsed > $available + 0.009) {
+                return response()->json(['message' => 'The received amount available is only Rs. ' . number_format($available, 2) . '.'], 422);
+            }
+        }
+
+        $base = [
+            'customer_code' => $code,
+            'bill_key'      => $billKey,
+            'bill_no'       => $billKey ? ($data['bill_no'] ?? null) : null,
+            'bill_date'     => $billKey && !empty($data['bill_date']) ? substr($data['bill_date'], 0, 10) : null,
             'received_date' => substr($data['received_date'], 0, 10),
             'note'          => $data['note'] ?? null,
             'created_at'    => now(),
             'updated_at'    => now(),
-        ]);
-        return response()->json(DB::table('customer_bill_settlements')->find($id), 201);
+        ];
+        // Only the last row of a settlement closes the bill
+        $closes = $billKey && !empty($data['closes_bill']);
+        $ids = DB::transaction(function () use ($base, $amount, $creditUsed, $closes, $hasFlags) {
+            $ids = [];
+            if ($creditUsed > 0) {
+                $ids[] = DB::table('customer_bill_settlements')->insertGetId(array_merge($base, [
+                    'amount' => $creditUsed, 'from_credit' => 1, 'closes_bill' => ($closes && $amount <= 0) ? 1 : 0,
+                    'note' => trim(($base['note'] ? $base['note'] . ' · ' : '') . 'from received amount'),
+                ]));
+            }
+            if ($amount > 0) {
+                $ids[] = DB::table('customer_bill_settlements')->insertGetId($base + ['amount' => $amount]
+                    + ($hasFlags ? ['from_credit' => 0, 'closes_bill' => $closes ? 1 : 0] : []));
+            }
+            return $ids;
+        });
+
+        return response()->json(['ids' => $ids], 201);
     }
 
     /** Remove a settlement entered by mistake. */
