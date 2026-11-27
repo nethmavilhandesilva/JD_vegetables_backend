@@ -62,8 +62,27 @@ class AccountsController extends Controller
         });
     }
 
+    /** Loans typed in by hand (customer_manual_loans); each one is a bill with key "loan|{id}". */
+    private function manualLoans(?string $code = null)
+    {
+        if (!$this->tableExists('customer_manual_loans')) {
+            return collect();
+        }
+        $q = DB::table('customer_manual_loans');
+        if ($code !== null) {
+            $q->whereRaw('UPPER(TRIM(customer_code)) = ?', [strtoupper(trim($code))]);
+        }
+        return $q->orderBy('loan_date')->orderBy('id')->get()->map(function ($r) {
+            $r->customer_code = strtoupper(trim((string) $r->customer_code));
+            $r->amount = (float) $r->amount;
+            $r->loan_date = substr((string) $r->loan_date, 0, 10);
+            $r->bill_key = 'loan|' . $r->id;
+            return $r;
+        });
+    }
+
     /**
-     * Received money not given to a bill yet: received amounts (no bill) minus what was used
+     * Received money not given to a bill yet:received amounts (no bill) minus what was used
      * from them to settle bills. CODE => amount.
      */
     private function availableCredit($settlements): array
@@ -122,6 +141,12 @@ class AccountsController extends Controller
                 $bill['total'] += (float) $r->total;
                 $bills[$code][$key] = $bill;
             }
+        }
+
+        // Loans typed in by hand count as bills of the customer
+        foreach ($this->manualLoans() as $l) {
+            $bills[$l->customer_code][$l->bill_key] = ['key' => $l->bill_key, 'date' => $l->loan_date, 'total' => $l->amount];
+            $info[$l->customer_code] = $info[$l->customer_code] ?? ['sales_name' => null, 'in_today' => false, 'unprinted_records' => 0];
         }
 
         $settlements = $this->settlementRows();
@@ -224,6 +249,7 @@ class AccountsController extends Controller
             'customer' => $customer,
             'records' => $records->values(),
             'settlements' => $settlements->values(),
+            'loans' => $this->manualLoans($code)->values(),
             'available_credit' => $this->availableCredit($settlements)[strtoupper(trim($code))] ?? 0.0,
         ]);
     }
@@ -307,6 +333,49 @@ class AccountsController extends Controller
     {
         if ($this->tableExists('customer_bill_settlements')) {
             DB::table('customer_bill_settlements')->where('id', $id)->delete();
+        }
+        return response()->json(['deleted' => true]);
+    }
+
+    /** Add a customer loan by hand (shown and settled like a bill). */
+    public function storeLoan(Request $request)
+    {
+        if (!$this->tableExists('customer_manual_loans')) {
+            return response()->json(['message' => 'Import database/sql/2026_11_27_customer_manual_loans.sql first.'], 500);
+        }
+        $data = $request->validate([
+            'customer_code' => 'required|string|max:50',
+            'loan_date'     => 'required|date',
+            'ref_no'        => 'nullable|string|max:50',
+            'amount'        => 'required|numeric|gt:0',
+            'note'          => 'nullable|string|max:255',
+        ]);
+        $code = strtoupper(trim($data['customer_code']));
+        if ($code === '') {
+            return response()->json(['message' => 'Enter the customer code.'], 422);
+        }
+        $id = DB::table('customer_manual_loans')->insertGetId([
+            'customer_code' => $code,
+            'loan_date'     => substr($data['loan_date'], 0, 10),
+            'ref_no'        => trim((string) ($data['ref_no'] ?? '')) ?: null,
+            'amount'        => round((float) $data['amount'], 2),
+            'note'          => trim((string) ($data['note'] ?? '')) ?: null,
+            'created_at'    => now(),
+            'updated_at'    => now(),
+        ]);
+        return response()->json(['id' => $id, 'customer_code' => $code], 201);
+    }
+
+    /** Remove a loan typed in by mistake, with the payments saved against it. */
+    public function destroyLoan(int $id)
+    {
+        if ($this->tableExists('customer_manual_loans')) {
+            DB::transaction(function () use ($id) {
+                if ($this->tableExists('customer_bill_settlements')) {
+                    DB::table('customer_bill_settlements')->where('bill_key', 'loan|' . $id)->delete();
+                }
+                DB::table('customer_manual_loans')->where('id', $id)->delete();
+            });
         }
         return response()->json(['deleted' => true]);
     }

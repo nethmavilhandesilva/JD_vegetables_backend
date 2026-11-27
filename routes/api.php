@@ -60,6 +60,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/accounts/customers/{code}', [AccountsController::class, 'customerBills']);
     Route::post('/accounts/customers/{code}/settlements', [AccountsController::class, 'storeSettlement']);
     Route::delete('/accounts/customer-settlements/{id}', [AccountsController::class, 'destroySettlement']);
+    Route::post('/accounts/customer-loans', [AccountsController::class, 'storeLoan']);
+    Route::delete('/accounts/customer-loans/{id}', [AccountsController::class, 'destroyLoan']);
     Route::get('/accounts/suppliers', [AccountsController::class, 'suppliers']);
     Route::get('/accounts/suppliers/{code}', [AccountsController::class, 'supplierBills']);
     Route::put('/accounts/supplier-lines', [AccountsController::class, 'updateSupplierLines']);
