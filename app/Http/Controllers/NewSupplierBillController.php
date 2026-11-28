@@ -14,6 +14,9 @@ use Illuminate\Validation\Rule;
 /**
  * "New Supplier Bills" dashboard: supplier bills entered by hand and stored in
  * new_supplier_bills / new_supplier_bill_items. Independent of the sales tables.
+ * Two modes (bill_type): 'supplier' bills (commission taken off) and 'customer' bills (no
+ * commission; supplier_code / supplier_name hold the customer code / name). Printed customer
+ * bills are also listed in Accounts > Customers.
  */
 class NewSupplierBillController extends Controller
 {
@@ -35,9 +38,16 @@ class NewSupplierBillController extends Controller
             'printed_from'  => 'nullable|date',
             'printed_to'    => 'nullable|date|after:printed_from',
             'printed_on'    => 'nullable|date_format:Y-m-d',
+            'bill_type'     => ['nullable', Rule::in(['supplier', 'customer'])],
         ]);
 
         $query = NewSupplierBill::query();
+        // Supplier bills unless customer bills are asked for (so supplier totals never include customer bills)
+        if ($this->hasBillType()) {
+            $query->where('bill_type', $data['bill_type'] ?? 'supplier');
+        } elseif (($data['bill_type'] ?? 'supplier') === 'customer') {
+            $query->whereRaw('1 = 0'); // no customer bills before the column exists
+        }
 
         if (! empty($data['start_date'])) {
             $query->whereDate('bill_date', '>=', $data['start_date']);
@@ -129,11 +139,12 @@ class NewSupplierBillController extends Controller
         ]);
     }
 
-    /** Supplier and item pickers for the entry form. */
+    /** Supplier, customer and item pickers for the entry form. */
     public function options()
     {
         return response()->json([
             'suppliers' => Supplier::query()->select('code', 'name')->orderBy('code')->get(),
+            'customers' => DB::table('customers')->select('short_name as code', 'name')->whereNotNull('short_name')->where('short_name', '<>', '')->orderBy('short_name')->get(),
             'items'     => Item::query()->select('no', 'type', 'pack_cost')->orderBy('no')->get(),
         ]);
     }
@@ -153,7 +164,9 @@ class NewSupplierBillController extends Controller
                 'created_by' => optional($request->user())->id,
             ]);
             // Bill number from the auto id: unique without any race between users.
-            $bill->bill_no = 'SB-' . str_pad((string) $bill->id, 5, '0', STR_PAD_LEFT);
+            // SB- supplier bill, CB- customer bill.
+            $prefix = ($data['bill_type'] ?? 'supplier') === 'customer' ? 'CB-' : 'SB-';
+            $bill->bill_no = $prefix . str_pad((string) $bill->id, 5, '0', STR_PAD_LEFT);
             $bill->save();
 
             $bill->items()->createMany($data['lines']);
@@ -166,6 +179,10 @@ class NewSupplierBillController extends Controller
 
     public function update(Request $request, NewSupplierBill $newSupplierBill)
     {
+        // A bill keeps its type (its number is SB- or CB-)
+        if ($this->hasBillType()) {
+            $request->merge(['bill_type' => $newSupplierBill->bill_type ?: 'supplier']);
+        }
         $data = $this->validated($request);
 
         DB::transaction(function () use ($data, $newSupplierBill) {
@@ -210,6 +227,7 @@ class NewSupplierBillController extends Controller
             'notes'                => 'nullable|string|max:2000',
             'print'                => 'nullable|boolean',
             'payment_type'         => ['nullable', Rule::in(['credit', 'cash'])],
+            'bill_type'            => ['nullable', Rule::in(['supplier', 'customer'])],
             'items'                => 'required|array|min:1',
             'items.*.item_code'    => 'required|string|max:50',
             'items.*.item_name'    => 'nullable|string|max:255',
@@ -228,6 +246,11 @@ class NewSupplierBillController extends Controller
         $gross = 0.0;
         $commission = 0.0;
         $supplierCode = strtoupper(trim($data['supplier_code']));
+        $data['bill_type'] = $data['bill_type'] ?? 'supplier';
+        $isCustomer = $data['bill_type'] === 'customer';
+        if ($isCustomer && !$this->hasBillType()) {
+            abort(response()->json(['message' => 'Import database/sql/2026_11_28_new_supplier_bills_bill_type.sql first.'], 500));
+        }
 
         foreach ($data['items'] as $line) {
             $weight = round((float) $line['weight'], 3);
@@ -252,7 +275,7 @@ class NewSupplierBillController extends Controller
                 $lineCommission = 0.0;
                 foreach ($packWeights as $j => $w) {
                     $amount += $w * $packPrices[$j];
-                    $lineCommission += $w * $this->commissionPerKg($itemCode, $supplierCode, $packPrices[$j]);
+                    $lineCommission += $isCustomer ? 0 : $w * $this->commissionPerKg($itemCode, $supplierCode, $packPrices[$j]);
                 }
                 $amount = round($amount, 2);
                 $lineCommission = round($lineCommission, 2);
@@ -262,7 +285,7 @@ class NewSupplierBillController extends Controller
             } else {
                 $amount = round($weight * $price, 2);
                 // Commission per kg from the commission rules (same as Sales Entry); deducted from the supplier
-                $commissionPerKg = $this->commissionPerKg($itemCode, $supplierCode, $price);
+                $commissionPerKg = $isCustomer ? 0.0 : $this->commissionPerKg($itemCode, $supplierCode, $price);
                 $lineCommission = round($weight * $commissionPerKg, 2);
             }
 
@@ -361,6 +384,12 @@ class NewSupplierBillController extends Controller
         }
     }
 
+    private function hasBillType(): bool
+    {
+        static $has = null;
+        return $has ??= Schema::hasColumn('new_supplier_bills', 'bill_type');
+    }
+
     private function onlyExistingColumns(string $table, array $fields): array
     {
         static $columns = [];
@@ -382,8 +411,11 @@ class NewSupplierBillController extends Controller
     private function headerAttributes(array $data): array
     {
         $supplierCode = strtoupper(trim($data['supplier_code']));
+        // Customer bill: the code / name are the customer's
         $supplierName = $data['supplier_name']
-            ?? Supplier::whereRaw('UPPER(code) = ?', [$supplierCode])->value('name');
+            ?? (($data['bill_type'] ?? 'supplier') === 'customer'
+                ? DB::table('customers')->whereRaw('UPPER(short_name) = ?', [$supplierCode])->value('name')
+                : Supplier::whereRaw('UPPER(code) = ?', [$supplierCode])->value('name'));
 
         return [
             'bill_date'      => $data['bill_date'],
@@ -395,6 +427,7 @@ class NewSupplierBillController extends Controller
         ] + $this->onlyExistingColumns('new_supplier_bills', [
             // Credit / Cash buttons on the entry screen (Credit by default)
             'payment_type'   => $data['payment_type'] ?? 'credit',
+            'bill_type'      => $data['bill_type'] ?? 'supplier',
         ]) + $data['totals'];
     }
 }

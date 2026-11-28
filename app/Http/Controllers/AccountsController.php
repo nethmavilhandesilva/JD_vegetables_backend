@@ -82,6 +82,41 @@ class AccountsController extends Controller
     }
 
     /**
+     * Printed customer bills from the New Supplier Bills page (bill_type 'customer'), today's and
+     * those moved to history at day end. Each is a bill with key "cbill|{bill_no}"; the amount paid
+     * when it was made (all of it for a cash bill) counts as received.
+     */
+    private function pageCustomerBills(?string $code = null)
+    {
+        $rows = collect();
+        foreach (['new_supplier_bills', 'history_new_supplier_bills'] as $table) {
+            if (!$this->tableExists($table) || !Schema::hasColumn($table, 'bill_type')) {
+                continue;
+            }
+            $q = DB::table($table)->where('bill_type', 'customer')->where('is_printed', 1)->whereNotNull('bill_no');
+            if ($code !== null) {
+                $q->whereRaw('UPPER(TRIM(supplier_code)) = ?', [strtoupper(trim($code))]);
+            }
+            $hasPayment = Schema::hasColumn($table, 'payment_type');
+            foreach ($q->get() as $r) {
+                $net = round((float) $r->net_amount, 2);
+                $cash = $hasPayment && ($r->payment_type ?? 'credit') === 'cash';
+                $rows->put($r->bill_no, (object) [
+                    'bill_key'      => 'cbill|' . $r->bill_no,
+                    'bill_no'       => $r->bill_no,
+                    'customer_code' => strtoupper(trim((string) $r->supplier_code)),
+                    'customer_name' => $r->supplier_name,
+                    'bill_date'     => substr((string) $r->bill_date, 0, 10),
+                    'total'         => $net,
+                    'prepaid'       => $cash ? $net : min($net, round((float) $r->paid_amount, 2)),
+                    'payment_type'  => $cash ? 'cash' : 'credit',
+                ]);
+            }
+        }
+        return $rows->values();
+    }
+
+    /**
      * Received money not given to a bill yet:received amounts (no bill) minus what was used
      * from them to settle bills. CODE => amount.
      */
@@ -153,6 +188,15 @@ class AccountsController extends Controller
         $paid = [];   // CODE|billKey => received
         $closed = []; // CODE|billKey => true
         $lastReceived = [];
+
+        // Customer bills made on the New Supplier Bills page; money paid with the bill counts as received
+        foreach ($this->pageCustomerBills() as $b) {
+            $bills[$b->customer_code][$b->bill_key] = ['key' => $b->bill_key, 'date' => $b->bill_date, 'total' => $b->total];
+            $info[$b->customer_code] = $info[$b->customer_code] ?? ['sales_name' => $b->customer_name, 'in_today' => false, 'unprinted_records' => 0];
+            if ($b->prepaid > 0) {
+                $paid[$b->customer_code . '|' . $b->bill_key] = $b->prepaid;
+            }
+        }
         foreach ($settlements as $r) {
             if ($r->bill_key === null || $r->bill_key === '') continue;
             $k = $r->customer_code . '|' . $r->bill_key;
@@ -250,6 +294,7 @@ class AccountsController extends Controller
             'records' => $records->values(),
             'settlements' => $settlements->values(),
             'loans' => $this->manualLoans($code)->values(),
+            'page_bills' => $this->pageCustomerBills($code)->values(),
             'available_credit' => $this->availableCredit($settlements)[strtoupper(trim($code))] ?? 0.0,
         ]);
     }

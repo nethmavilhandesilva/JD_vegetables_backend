@@ -13,7 +13,7 @@ class NewSupplierBill extends Model
     protected $table = 'new_supplier_bills';
 
     protected $fillable = [
-        'bill_no', 'bill_date', 'supplier_code', 'supplier_name', 'reference_no',
+        'bill_no', 'bill_type', 'bill_date', 'supplier_code', 'supplier_name', 'reference_no',
         'total_packs', 'total_weight', 'gross_amount', 'commission_amount', 'deductions', 'deduction_note',
         'net_amount', 'paid_amount', 'balance_amount', 'status', 'payment_type', 'is_printed', 'printed_at',
         'notes', 'created_by',

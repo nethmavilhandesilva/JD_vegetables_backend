@@ -1416,6 +1416,9 @@ private function calculateKuliya($packs): float
         }
         $migration = require database_path('migrations/2026_11_18_000100_create_history_new_supplier_bills_tables.php');
         $migration->up();
+        // Supplier / customer bill type, so the day end keeps it
+        $billType = require database_path('migrations/2026_11_28_000000_add_bill_type_to_new_supplier_bills.php');
+        $billType->up();
     }
 
     private function moveNewSupplierBillsToHistory(): int
