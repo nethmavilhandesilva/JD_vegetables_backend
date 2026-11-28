@@ -809,6 +809,30 @@ public function updateHire(Request $request)
         return response()->json(['message' => 'Hire amount saved.', 'data' => $supplier], 200);
     }
 
+/**
+ * Supplier report page, "Edit hire" on a printed bill: changes the hire amount saved with
+ * that supplier bill number (used on reprints and in Accounts). The supplier's own pending
+ * hire is not touched.
+ */
+public function updateBillHire(Request $request, $billNo)
+    {
+        $validated = $request->validate([
+            'hire_amount' => 'required|numeric|min:0',
+        ]);
+
+        if (!\Illuminate\Support\Facades\Schema::hasColumn('supplier_bill_links', 'hire_amount')) {
+            return response()->json(['message' => 'The hire_amount column of supplier_bill_links is missing.'], 500);
+        }
+        if (!DB::table('supplier_bill_links')->where('bill_no', $billNo)->exists()) {
+            return response()->json(['message' => 'Supplier bill ' . $billNo . ' was not found.'], 404);
+        }
+
+        $hire = round((float) $validated['hire_amount'], 2);
+        DB::table('supplier_bill_links')->where('bill_no', $billNo)->update(['hire_amount' => $hire]);
+
+        return response()->json(['message' => 'Hire amount saved.', 'bill_no' => $billNo, 'hire_amount' => $hire]);
+    }
+
 /** Advance and hire a printed supplier bill was printed with (for reprints). */
 public function billCharges($billNo)
     {

@@ -242,6 +242,7 @@ Route::put('/sales/{id}/update-supplier', [SupplierController::class, 'updateSup
 Route::post('/suppliers/advance', [SupplierController::class, 'store2']);
 Route::post('/suppliers/hire', [SupplierController::class, 'updateHire']);
 Route::get('/suppliers/bill/{billNo}/charges', [SupplierController::class, 'billCharges']);
+Route::put('/suppliers/bill/{billNo}/hire', [SupplierController::class, 'updateBillHire']);
 Route::get('/suppliers/search-by-code/{code}', [SupplierController::class, 'getByCode']);
 //NEW SALES REPORT
 Route::get('/reports/sales-summary', [ReportController::class, 'getSalesSummary']);
