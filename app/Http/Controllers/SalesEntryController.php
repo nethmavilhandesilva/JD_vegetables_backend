@@ -925,6 +925,121 @@ class SalesEntryController extends Controller
         }
     }
     /**
+     * Edit a record of an earlier day (sales_histories), from the Sales Entry date filter.
+     * Same calculations as update(): commission from the rules, bag price from the item,
+     * kuliya typed or per bag. Bill number and printed status stay as they are.
+     * PUT /sales/history/{id}
+     */
+    public function updateHistory(Request $request, int $id): JsonResponse
+    {
+        $data = $request->validate([
+            'customer_code' => 'required|string|max:255',
+            'customer_name' => 'nullable|string|max:255',
+            'supplier_code' => 'nullable|string|max:255',
+            'item_code'     => 'required|string|max:255',
+            'item_name'     => 'required|string|max:255',
+            'weight'        => 'required|numeric|min:0',
+            'price_per_kg'  => 'required|numeric|min:0',
+            'packs'         => 'required|integer|min:0',
+            'kuliya'        => 'nullable|numeric',
+        ]);
+
+        $row = DB::table('sales_histories')->where('id', $id)->first();
+        if (!$row) {
+            return response()->json(['success' => false, 'message' => 'Record not found in sales history.'], 404);
+        }
+        $currentUser = auth()->user();
+        if ($currentUser && $currentUser->role === 'User' && property_exists($row, 'UniqueCode') && $row->UniqueCode !== null
+            && (string) $row->UniqueCode !== (string) $currentUser->user_id) {
+            return response()->json(['success' => false, 'message' => 'You can only edit your own records.'], 403);
+        }
+
+        try {
+            $item = Item::where('no', $data['item_code'])->first();
+            if (!$item) {
+                return response()->json(['success' => false, 'message' => 'Item not found.'], 422);
+            }
+            $supplierCode = strtoupper(trim((string) ($data['supplier_code'] ?? $row->supplier_code)));
+            $price = (float) $data['price_per_kg'];
+            $weight = (float) $data['weight'];
+            $packs = (int) $data['packs'];
+            $bagPrice = (float) ($item->pack_cost ?? 0);
+            $commission = $this->findCommissionAmount($data['item_code'], $supplierCode, $price);
+            $supplierPrice = abs($price - $commission);
+            $supplierTotal = $weight * $supplierPrice;
+            $total = $weight * $price + $packs * $bagPrice;
+            $kuliya = $request->filled('kuliya') ? (float) $data['kuliya'] : $this->calculateKuliya($packs);
+
+            $fields = [
+                'customer_code'      => strtoupper(trim($data['customer_code'])),
+                'customer_name'      => $data['customer_name'] ?? $row->customer_name ?? null,
+                'code'               => $data['item_code'],
+                'supplier_code'      => $supplierCode,
+                'item_code'          => $data['item_code'],
+                'item_name'          => $data['item_name'],
+                'weight'             => $weight,
+                'SupplierWeight'     => $weight,
+                'packs'              => $packs,
+                'price_per_kg'       => $price,
+                'commission_amount'  => $commission,
+                'SupplierPricePerKg' => $supplierPrice,
+                'SupplierTotal'      => $supplierTotal,
+                'pack_due'           => $bagPrice,
+                'CustomerPackLabour' => $bagPrice,
+                'CustomerPackCost'   => $bagPrice,
+                'total'              => $total,
+                'profit'             => $total - $supplierTotal,
+                'Kuliya'             => $kuliya,
+                'updated'            => 'Y',
+                'BillChangedOn'      => now(),
+                'updated_at'         => now(),
+            ];
+            $columns = array_map('strtolower', Schema::getColumnListing('sales_histories'));
+            $fields = array_filter($fields, fn ($k) => in_array(strtolower($k), $columns, true), ARRAY_FILTER_USE_KEY);
+
+            DB::transaction(function () use ($row, $fields, $id) {
+                // Adjustments report: the record before and after the change
+                $this->logHistoryAdjustment((array) $row, 'original');
+                DB::table('sales_histories')->where('id', $id)->update($fields);
+                $this->logHistoryAdjustment((array) DB::table('sales_histories')->where('id', $id)->first(), 'updated');
+            });
+
+            $fresh = DB::table('sales_histories')->where('id', $id)->first();
+            return response()->json(['success' => true, 'sales' => [$fresh]]);
+        } catch (\Throwable $e) {
+            Log::error('SalesEntryController@updateHistory FAILED', ['id' => $id, 'message' => $e->getMessage()]);
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /** One Salesadjustment row for a history edit (best effort: a logging problem never blocks the edit). */
+    private function logHistoryAdjustment(array $r, string $type): void
+    {
+        try {
+            Salesadjustment::create([
+                'customer_code' => $r['customer_code'] ?? null,
+                'supplier_code' => $r['supplier_code'] ?? null,
+                'code'          => $r['item_code'] ?? null,
+                'item_code'     => $r['item_code'] ?? null,
+                'item_name'     => $r['item_name'] ?? null,
+                'weight'        => $r['weight'] ?? 0,
+                'price_per_kg'  => $r['price_per_kg'] ?? 0,
+                'pack_due'      => $r['pack_due'] ?? 0,
+                'total'         => $r['total'] ?? 0,
+                'packs'         => $r['packs'] ?? 0,
+                'bill_no'       => $r['bill_no'] ?? null,
+                'user_id'       => 'c11',
+                'type'          => $type,
+                'original_created_at' => $r['created_at'] ?? null,
+                'original_updated_at' => $r['updated_at'] ?? null,
+                'Date'          => isset($r['Date']) ? substr((string) $r['Date'], 0, 10) : now()->format('Y-m-d'),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('History edit adjustment log failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
      * Commission per kg for a sale, from the commission rules (see Commission::amountFor).
      */
     private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): float

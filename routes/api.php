@@ -167,6 +167,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // SALES
     Route::get('/sales', [SalesEntryController::class, 'index']);
     Route::get('/sales/history', [SalesEntryController::class, 'historyByDate']);
+    Route::put('/sales/history/{id}', [SalesEntryController::class, 'updateHistory'])->whereNumber('id');
     Route::post('/sales', [SalesEntryController::class, 'store']);
     Route::put('/sales/{sale}', [SalesEntryController::class, 'update']);
     Route::delete('/sales/{sale}', [SalesEntryController::class, 'destroy']);
